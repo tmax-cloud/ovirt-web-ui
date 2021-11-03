@@ -1,10 +1,18 @@
 import React from 'react'
 import PropTypes from 'prop-types'
 import { connect } from 'react-redux'
-import { localeCompare, isWindows } from '_/helpers'
-import { msg } from '_/intl'
+import { localeCompare } from '_/helpers'
+import { withMsg } from '_/intl'
 import { isNumberInRange } from '_/utils'
 import { BASIC_DATA_SHAPE } from '../dataPropTypes'
+import {
+  handleClusterIdChange,
+  handleProvisionSourceChange,
+  handleTemplateIdChange,
+  checkTimeZone,
+  isOsLinux,
+  isOsWindows,
+} from '../helpers'
 
 import {
   createClusterList,
@@ -19,9 +27,9 @@ import {
 
 import {
   ExpandCollapse,
-  FieldLevelHelp,
   Form,
   FormControl,
+  HelpBlock,
   Checkbox,
 } from 'patternfly-react'
 import { Grid, Row, Col } from '_/components/Grid'
@@ -30,6 +38,7 @@ import SelectBox from '_/components/SelectBox'
 import timezones from '_/components/utils/timezones.json'
 
 import style from './style.css'
+import { InfoTooltip } from '_/components/tooltips'
 
 /*
  * Render a label plus children as a single grid row with 2 columns.
@@ -45,6 +54,7 @@ const FieldRow = ({
   fieldCols = 7,
   children,
   tooltip,
+  errorMessage,
 }) => (
   <Row className={`
       form-group
@@ -61,6 +71,9 @@ const FieldRow = ({
             {label}
           </div>
           <div>{children}</div>
+          {(validationState && errorMessage) &&
+            <HelpBlock>{errorMessage}</HelpBlock>
+          }
         </Col>
       </React.Fragment>
     }
@@ -69,13 +82,18 @@ const FieldRow = ({
         <Col cols={labelCols} className={`control-label ${style['col-label']}`}>
           {label}
           { tooltip &&
-            <FieldLevelHelp
-              content={tooltip}
-              inline
+            <InfoTooltip
+              tooltip={tooltip}
+              id={`${id}-tooltip`}
             />
           }
         </Col>
-        <Col cols={fieldCols} className={style['col-data']} id={id}>{children}</Col>
+        <Col cols={fieldCols} className={style['col-data']} id={id}>
+          {children}
+          {(validationState && errorMessage) &&
+            <HelpBlock>{errorMessage}</HelpBlock>
+          }
+        </Col>
       </React.Fragment>
     }
   </Row>
@@ -91,6 +109,7 @@ FieldRow.propTypes = {
   fieldCols: PropTypes.number,
   children: PropTypes.node.isRequired,
   tooltip: PropTypes.string,
+  errorMessage: PropTypes.string,
 }
 
 const SubHeading = ({ children }) => (
@@ -112,21 +131,11 @@ function isValidUid (toTest) {
   return toTest && toTest !== '_'
 }
 
-function isOsLinux (operatingSystemId, operatingSystems) {
-  const os = operatingSystems.get(operatingSystemId)
-  return os && !os.get('isWindows')
-}
-
-function isOsWindows (operatingSystemId, operatingSystems) {
-  const os = operatingSystems.get(operatingSystemId)
-  return os && os.get('isWindows')
-}
-
-export const optimizedForMap = {
+export const optimizedForMap = (msg) => ({
   'desktop': { id: 'desktop', value: msg.vmType_desktop() },
   'server': { id: 'server', value: msg.vmType_server() },
-  // 'high_performance': { id: 'high_performance', value: msg.vmType_highPerformance() },
-}
+  'high_performance': { id: 'high_performance', value: msg.vmType_highPerformance() },
+})
 
 /**
  * Basic Setting Wizard Step #1
@@ -135,13 +144,13 @@ export const optimizedForMap = {
 class BasicSettings extends React.Component {
   constructor (props) {
     super(props)
-    this.checkTimeZone = this.checkTimeZone.bind(this)
     this.getTopologySettings = this.getTopologySettings.bind(this)
     this.handleChange = this.handleChange.bind(this)
     this.validateForm = this.validateForm.bind(this)
     this.validateVmName = this.validateVmName.bind(this)
     this.mapVCpuTopologyItems = this.mapVCpuTopologyItems.bind(this)
-    this.handleProvisionSourceChange = this.handleProvisionSourceChange.bind(this)
+    this.buildOptimizedForList = this.buildOptimizedForList.bind(this)
+    this.grabCpuOptions = this.grabCpuOptions.bind(this)
 
     this.fields = {
       select: [
@@ -153,40 +162,13 @@ class BasicSettings extends React.Component {
     }
   }
 
-  checkTimeZone (osId, templateId) {
-    const { defaultGeneralTimezone, defaultWindowsTimezone } = this.props
-    const template = templateId ? this.props.templates.get(templateId) : undefined
-
-    let timeZone = {
-      name: defaultGeneralTimezone,
-    }
-    const osType = this.props.operatingSystems.getIn([ osId, 'name' ])
-
-    if (template && template.getIn(['timeZone', 'name'])) {
-      timeZone = template.get('timeZone').toJS()
-    }
-
-    const isWindowsTimeZone = timeZone && timezones.find(timezone => timezone.id === timeZone.name)
-    const isWindowsVm = isWindows(osType)
-
-    if (isWindowsVm && !isWindowsTimeZone) {
-      timeZone = {
-        name: defaultWindowsTimezone,
-      }
-    }
-    if (!isWindowsVm && isWindowsTimeZone) {
-      timeZone = {
-        name: defaultGeneralTimezone,
-      }
-    }
-    return timeZone
-  }
-
   validateForm (dataSet) {
     const {
+      msg,
       dataCenters, clusters, storageDomains, templates, operatingSystems,
-      maxMemorySizeInMiB, maxNumOfVmCpus,
+      maxMemorySizeInMiB,
     } = this.props
+    const { maxNumOfVmCpus } = this.grabCpuOptions()
 
     const okName = dataSet.name && isVmNameValid(dataSet.name)
 
@@ -205,10 +187,11 @@ class BasicSettings extends React.Component {
     const okProvisionTemplate = dataSet.provisionSource === 'template' &&
         [ null, dataSet.clusterId ].includes(templates.getIn([ dataSet.templateId, 'clusterId' ]))
 
+    const okCpu = isNumberInRange(dataSet.cpus, 0, maxNumOfVmCpus)
+
     const okOperatingSystem = dataSet.operatingSystemId && operatingSystems.find(os => os.get('id') === dataSet.operatingSystemId) !== undefined
     const okMemory = isNumberInRange(dataSet.memory, 0, maxMemorySizeInMiB)
-    const okCpu = isNumberInRange(dataSet.cpus, 0, maxNumOfVmCpus)
-    const okOptimizedFor = dataSet.optimizedFor && optimizedForMap[dataSet.optimizedFor] !== undefined
+    const okOptimizedFor = dataSet.optimizedFor && this.buildOptimizedForList(dataSet, msg)[dataSet.optimizedFor] !== undefined
 
     const checkInit = dataSet.cloudInitEnabled
     const okInitHostname = dataSet.initHostname ? isHostNameValid(dataSet.initHostname) : true
@@ -220,6 +203,25 @@ class BasicSettings extends React.Component {
       (checkInit ? okInitHostname : true)
   }
 
+  /**
+   * supports in showing high performance option only for HP template based vm.
+   * TODO remove when REST API will fully support creating of a High Performance VM type, not based on a template
+   **/
+  buildOptimizedForList (dataSet, msg) {
+    const optimizedForList = { ...optimizedForMap(msg) }
+
+    const template = this.props.templates.find(template => template.get('id') === dataSet.templateId)
+    const templateOrigOptimizedFor = template && template.get('type')
+    if (dataSet.provisionSource !== 'template' || templateOrigOptimizedFor !== 'high_performance') {
+      delete optimizedForList.high_performance
+    } else {
+      delete optimizedForList.desktop
+      delete optimizedForList.server
+    }
+
+    return optimizedForList
+  }
+
   validateVmName () {
     const name = this.props.data.name
     return name === undefined || name.length === 0 || !isVmNameValid(name) ? 'error' : null
@@ -228,38 +230,42 @@ class BasicSettings extends React.Component {
   // Calculate the proper number of virtual sockets, cores per virtual socket, threads per core according to the number of virtual CPUs
   // any change of the number of vCpus in the Basic settings requires recalculation of the numer of cores, sockets, threads
   getTopologySettings (vcpus, force = {}) {
+    const { maxNumOfSockets, maxNumOfCores, maxNumOfThreads } = this.grabCpuOptions()
     return getTopology({
       value: vcpus,
       max: {
-        sockets: this.props.maxNumOfSockets,
-        cores: this.props.maxNumOfCores,
-        threads: this.props.maxNumOfThreads,
+        sockets: maxNumOfSockets,
+        cores: maxNumOfCores,
+        threads: maxNumOfThreads,
       },
       force: force,
     })
   }
 
-  handleProvisionSourceChange (provisionSource) {
-    const changes = {}
-    const { defaultValues } = this.props
+  grabCpuOptions () {
+    const { data, clusters, templates } = this.props
 
-    changes.provisionSource = provisionSource
-    changes.isoImage = undefined
-    changes.templateId = undefined
-    changes.operatingSystemId = defaultValues.operatingSystemId
-    changes.memory = defaultValues.memory
-    changes.cpus = defaultValues.cpus
-    changes.topology = defaultValues.topology
-    changes.optimizedFor = defaultValues.optimizedFor
-    changes.cloudInitEnabled = defaultValues.initEnabled
-
-    // when changing Provision type to ISO, set the default time zone according to the OS
-    if (changes.provisionSource === 'iso') {
-      changes.timeZone = this.checkTimeZone(changes.operatingSystemId, changes.templateId)
-      changes.initTimezone = '' // reset the sysprep timezone value, we don't support cloud-init TZ yet
+    // No cluster has been selected yet.........
+    if (!isValidUid(data.clusterId)) {
+      return {
+        maxNumOfSockets: 1,
+        maxNumOfCores: 1,
+        maxNumOfThreads: 1,
+        maxNumOfVmCpus: 1,
+      }
     }
 
-    return changes
+    // CPU options come from the selected Template (if selected and defined there) or Cluster
+    const template = templates.get(data.templateId)
+    const cluster = clusters.get(data.clusterId)
+
+    const cpuOptions = (template && template.get('cpuOptions')) || cluster.get('cpuOptions')
+    return {
+      maxNumOfSockets: cpuOptions.get('maxNumOfSockets'),
+      maxNumOfCores: cpuOptions.get('maxNumOfCores'),
+      maxNumOfThreads: cpuOptions.get('maxNumOfThreads'),
+      maxNumOfVmCpus: cpuOptions.get('maxNumOfVmCpus'),
+    }
   }
 
   handleChange (field, value, extra) {
@@ -276,44 +282,26 @@ class BasicSettings extends React.Component {
     let changes = {}
     switch (field) {
       case 'clusterId':
-        const templateList = value ? createTemplateList(this.props.templates, value) : []
-        changes.dataCenterId = value ? this.props.clusters.getIn([value, 'dataCenterId']) : undefined
-        changes.clusterId = value
-        changes.provisionSource =
-            (templateList.length === 1 && templateList[0].id === this.props.blankTemplateId)
-              ? 'iso'
-              : 'template'
-        changes.templateId = templateList.length === 1 ? this.props.blankTemplateId : undefined
-        changes = { ...changes, ...this.handleProvisionSourceChange(changes.provisionSource) }
+        changes = handleClusterIdChange(value, this.props)
         break
 
       case 'provisionSource':
-        changes = this.handleProvisionSourceChange(value)
+        changes = handleProvisionSourceChange(value, this.props)
         break
 
       case 'templateId':
-        const template = this.props.templates.find(t => t.get('id') === value)
-        changes.templateId = template.get('id')
-        changes.memory = template.get('memory') / (1024 ** 2) // stored in bytes, input in Mib
-        changes.cpus = template.getIn([ 'cpu', 'vCPUs' ])
-        changes.topology = template.getIn([ 'cpu', 'topology' ]).toJS()
-        changes.optimizedFor = template.get('type', this.props.data.optimizedFor)
-        changes.operatingSystemId = this.props.operatingSystems
-          .find(os => os.get('name') === template.getIn([ 'os', 'type' ]))
-          .get('id')
-
-        // Check template's timezone compatibility with the template's OS, set the timezone corresponding to the template's OS
-        changes.timeZone = this.checkTimeZone(changes.operatingSystemId, changes.templateId)
-        changes.cloudInitEnabled = template.getIn(['cloudInit', 'enabled'])
-        changes.initHostname = template.getIn(['cloudInit', 'hostName'])
-        changes.initSshKeys = template.getIn(['cloudInit', 'sshAuthorizedKeys'])
-        changes.initTimezone = template.getIn(['cloudInit', 'timezone'])
-        changes.initCustomScript = template.getIn(['cloudInit', 'customScript'])
+        const { data: { optimizedFor } } = this.props
+        changes = handleTemplateIdChange(value, optimizedFor, this.props)
         break
 
       case 'operatingSystemId':
         changes[field] = value
-        changes.timeZone = this.checkTimeZone(value, this.props.data.templateId)
+        const { data: { templateId } } = this.props
+        changes.timeZone = checkTimeZone(value, templateId, this.props)
+        // only when changing the OS from one Windows to other Windows
+        changes.initTimezone = this.props.data.cloudInitEnabled && this.props.data.enableInitTimezone && isOsWindows(value, this.props.operatingSystems)
+          ? this.props.data.lastInitTimezone // set the sysprep timezone as the last selected sysprep timezone
+          : ''
         break
 
       case 'memory':
@@ -323,7 +311,8 @@ class BasicSettings extends React.Component {
         break
 
       case 'cpus':
-        if (isNumberInRange(value, 0, this.props.maxNumOfVmCpus)) {
+        const { maxNumOfVmCpus } = this.grabCpuOptions()
+        if (isNumberInRange(value, 0, maxNumOfVmCpus)) {
           changes.cpus = +value
         }
 
@@ -332,6 +321,24 @@ class BasicSettings extends React.Component {
 
       case 'topology': // number of sockets, cores or threads changed by the user in Advanced Options section
         changes[field] = this.getTopologySettings(this.props.data.cpus, { [extra.vcpu]: +value })
+        break
+
+      case 'enableInitTimezone': // Configure Timezone checkbox change
+        changes[field] = value
+        // if the Configure Timezone checkbox checked, set the sysprep timezone
+        changes.initTimezone = value ? this.props.data.initTimezone || this.props.data.lastInitTimezone : ''
+        break
+
+      case 'initTimezone': // sysprep timezone change
+        changes[field] = value
+        changes.lastInitTimezone = value // save the actual selected sysprep timezone
+        break
+
+      case 'cloudInitEnabled': // Cloud-init/Sysprep checkbox change
+        changes[field] = value
+        changes.initTimezone = value && this.props.data.enableInitTimezone && isOsWindows(this.props.data.operatingSystemId, this.props.operatingSystems)
+          ? this.props.data.lastInitTimezone
+          : ''
         break
 
       default:
@@ -354,20 +361,27 @@ class BasicSettings extends React.Component {
   }
 
   render () {
-    const idPrefix = this.props.id || 'create-vm-wizard-basic'
-    const { data, clusters, maxNumOfSockets, maxNumOfCores, maxNumOfThreads } = this.props
+    const {
+      data, clusters,
+      operatingSystems, id, dataCenters,
+      storageDomains, templates, msg, locale,
+    } = this.props
+
+    const idPrefix = id || 'create-vm-wizard-basic'
+
     const indicators = {
       name: this.validateVmName(),
+      hostName: !isHostNameValid(data.initHostname || ''),
     }
 
     const clusterList =
-      createClusterList(clusters)
+      createClusterList({ clusters, locale })
         .map(cluster => ({
           id: cluster.id,
-          value: `${cluster.value} (${this.props.dataCenters.find(dc => dc.id === cluster.datacenter).name})`,
+          value: `${cluster.value} (${dataCenters.find(dc => dc.id === cluster.datacenter).name})`,
         }))
     if (!isValidUid(data.clusterId)) {
-      clusterList.unshift({ id: '_', value: `-- ${msg.createVmWizardSelectCluster()} --` })
+      clusterList.unshift({ id: '_', value: clusterList.length === 0 ? `-- ${msg.noClustersAvailable()} --` : `-- ${msg.createVmWizardSelectCluster()} --` })
       indicators.cluster = !indicators.name && 'error'
     } else {
       delete indicators.cluster
@@ -387,20 +401,20 @@ class BasicSettings extends React.Component {
 
     const enableOsSelect = isValidUid(data.clusterId) && [ 'iso', 'template' ].includes(data.provisionSource)
     const operatingSystemList = enableOsSelect
-      ? createOsList(data.clusterId, clusters, this.props.operatingSystems)
+      ? createOsList({ clusterId: data.clusterId, clusters, operatingSystems, locale })
       : [ { id: '_', value: `-- ${msg.createVmWizardSelectClusterBeforeOS()} --` } ]
 
     const enableIsoSelect = data.provisionSource === 'iso' && isValidUid(data.dataCenterId)
     const isoList = enableIsoSelect
-      ? createIsoList(this.props.storageDomains, data.dataCenterId)
+      ? createIsoList(storageDomains, data.dataCenterId)
         .map(iso => ({
           id: iso.file.id,
           value: iso.file.name,
         }))
-        .sort((a, b) => localeCompare(a.value, b.value))
+        .sort((a, b) => localeCompare(a.value, b.value, locale))
       : [ { id: '_', value: `-- ${msg.createVmWizardSelectClusterBeforeISO()} --` } ]
     if (enableIsoSelect && !isValidUid(data.isoImage)) {
-      isoList.unshift({ id: '_', value: `-- ${msg.createVmWizardSelectISO()} --` })
+      isoList.unshift({ id: '_', value: isoList.length === 0 ? `-- ${msg.noCdsAvailable()} --` : `-- ${msg.createVmWizardSelectISO()} --` })
       indicators.isoList = !indicators.provisionSource && !indicators.name && 'error'
     } else {
       delete indicators.isoList
@@ -408,7 +422,7 @@ class BasicSettings extends React.Component {
 
     const enableTemplateSelect = data.provisionSource === 'template'
     const templateList = enableTemplateSelect && isValidUid(data.clusterId)
-      ? createTemplateList(this.props.templates, data.clusterId)
+      ? createTemplateList({ templates, clusterId: data.clusterId, locale })
       : [ { id: '_', value: `-- ${msg.createVmWizardSelectClusterBeforeTemplate()} --` } ]
     if (enableTemplateSelect && isValidUid(data.clusterId) && !isValidUid(data.templateId)) {
       templateList.unshift({ id: '_', value: `-- ${msg.createVmWizardSelectTemplate()} --` })
@@ -417,15 +431,16 @@ class BasicSettings extends React.Component {
       delete indicators.template
     }
 
-    const enableCloudInit = data.cloudInitEnabled && isOsLinux(data.operatingSystemId, this.props.operatingSystems)
-    const enableSysPrep = data.cloudInitEnabled && isOsWindows(data.operatingSystemId, this.props.operatingSystems)
+    const enableCloudInit = data.cloudInitEnabled && isOsLinux(data.operatingSystemId, operatingSystems)
+    const enableSysPrep = data.cloudInitEnabled && isOsWindows(data.operatingSystemId, operatingSystems)
 
     // for Advanced CPU Topology Options expand/collapse section
+    const { maxNumOfSockets, maxNumOfCores, maxNumOfThreads } = this.grabCpuOptions()
     const vCpuTopologyDividers = getTopologyPossibleValues({
       value: data.cpus,
-      maxNumberOfSockets: maxNumOfSockets,
-      maxNumberOfCores: maxNumOfCores,
-      maxNumberOfThreads: maxNumOfThreads,
+      maxNumOfSockets,
+      maxNumOfCores,
+      maxNumOfThreads,
     })
     // for Threads per Core tooltip
     const clusterId = data.clusterId || '_'
@@ -438,9 +453,10 @@ class BasicSettings extends React.Component {
     return <Form horizontal id={idPrefix}>
       <Grid className={style['settings-container']}>
         {/* -- VM name and where it will live -- */}
-        <FieldRow label={msg.name()} id={`${idPrefix}-name`} required validationState={indicators.name}>
+        <FieldRow label={msg.name()} id={`${idPrefix}-name`} required validationState={indicators.name} errorMessage={data.name ? msg.pleaseEnterValidVmName() : ''}>
           <FormControl
             id={`${idPrefix}-name-edit`}
+            autoFocus
             autoComplete='off'
             type='text'
             defaultValue={data.name}
@@ -536,7 +552,7 @@ class BasicSettings extends React.Component {
         <FieldRow label={msg.optimizedFor()} id={`${idPrefix}-optimizedFor`} required>
           <SelectBox
             id={`${idPrefix}-optimizedFor-edit`}
-            items={Object.values(optimizedForMap)}
+            items={Object.values(this.buildOptimizedForList(data, msg))}
             selected={data.optimizedFor || '_'}
             onChange={selectedId => this.handleChange('optimizedFor', selectedId)}
           />
@@ -567,8 +583,13 @@ class BasicSettings extends React.Component {
           <React.Fragment>
             <SubHeading>{msg.cloudInitOptions()}</SubHeading>
 
-            {/* TODO: cloud-init/linux hostname field level validation? */}
-            <FieldRow label={msg.hostName()} id={`${idPrefix}-cloudInitHostname`} vertical>
+            <FieldRow
+              label={msg.hostName()}
+              id={`${idPrefix}-cloudInitHostname`}
+              vertical
+              validationState={data.initHostname && indicators.hostName ? 'error' : undefined}
+              errorMessage={msg.pleaseEnterValidHostName()}
+            >
               <FormControl
                 id={`${idPrefix}-cloudInitHostname-edit`}
                 type='text'
@@ -593,8 +614,13 @@ class BasicSettings extends React.Component {
           <React.Fragment>
             <SubHeading>{msg.sysPrepOptions()}</SubHeading>
 
-            {/* TODO: sysprep/windows hostname field level validation? */}
-            <FieldRow label={msg.hostName()} id={`${idPrefix}-sysPrepHostname`} vertical>
+            <FieldRow
+              label={msg.hostName()}
+              id={`${idPrefix}-sysPrepHostname`}
+              vertical
+              validationState={data.initHostname && indicators.hostName ? 'error' : undefined}
+              errorMessage={msg.pleaseEnterValidHostName()}
+            >
               <FormControl
                 id={`${idPrefix}-sysPrepHostname-edit`}
                 type='text'
@@ -603,12 +629,24 @@ class BasicSettings extends React.Component {
               />
             </FieldRow>
 
+            {/*  Configure Timezone checkbox */}
+            <FieldRow id={`${idPrefix}-sysPrepTimezone-configure`} vertical>
+              <Checkbox
+                id={`${idPrefix}-sysprep-timezone-config`}
+                checked={data.enableInitTimezone}
+                onChange={e => this.handleChange('enableInitTimezone', e.target.checked)}
+              >
+                {msg.sysPrepTimezoneConfigure()}
+              </Checkbox>
+            </FieldRow>
+
             <FieldRow label={msg.sysPrepTimezone()} id={`${idPrefix}-sysPrepTimezone`} vertical>
               <SelectBox
                 id={`${idPrefix}-sysprep-timezone-select`}
                 items={timezones}
-                selected={data.initTimezone}
+                selected={data.lastInitTimezone}
                 onChange={selectedId => this.handleChange('initTimezone', selectedId)}
+                disabled={!data.enableInitTimezone}
               />
             </FieldRow>
 
@@ -675,25 +713,28 @@ class BasicSettings extends React.Component {
 BasicSettings.propTypes = {
   id: PropTypes.string,
   data: PropTypes.shape(BASIC_DATA_SHAPE),
+
+  // todo remove the 'eslint-disable-next-line' below when updating the eslint to newer version
+  // eslint-disable-next-line react/no-unused-prop-types
   defaultValues: PropTypes.shape(BASIC_DATA_SHAPE),
 
   dataCenters: PropTypes.object.isRequired,
   clusters: PropTypes.object.isRequired,
   operatingSystems: PropTypes.object.isRequired,
   templates: PropTypes.object.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
   blankTemplateId: PropTypes.string.isRequired,
   storageDomains: PropTypes.object.isRequired,
-  maxNumOfVmCpus: PropTypes.number.isRequired,
   maxMemorySizeInMiB: PropTypes.number.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
+  defaultGeneralTimezone: PropTypes.string.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
+  defaultWindowsTimezone: PropTypes.string.isRequired,
 
-  maxNumOfSockets: PropTypes.number.isRequired,
-  maxNumOfCores: PropTypes.number.isRequired,
-  maxNumOfThreads: PropTypes.number.isRequired,
+  msg: PropTypes.object.isRequired,
+  locale: PropTypes.string.isRequired,
 
   onUpdate: PropTypes.func.isRequired,
-
-  defaultGeneralTimezone: PropTypes.string.isRequired,
-  defaultWindowsTimezone: PropTypes.string.isRequired,
 }
 
 export default connect(
@@ -704,12 +745,8 @@ export default connect(
     templates: state.templates,
     blankTemplateId: state.config.get('blankTemplateId'),
     storageDomains: state.storageDomains,
-    maxNumOfVmCpus: state.config.get('maxNumOfVmCpus', 384),
     maxMemorySizeInMiB: 4194304, // TODO: 4TiB, no config option pulled as of 2019-Mar-22
     defaultGeneralTimezone: state.config.get('defaultGeneralTimezone'),
     defaultWindowsTimezone: state.config.get('defaultWindowsTimezone'),
-    maxNumOfSockets: state.config.get('maxNumberOfSockets'),
-    maxNumOfCores: state.config.get('maxNumberOfCores'),
-    maxNumOfThreads: state.config.get('maxNumberOfThreads'),
   })
-)(BasicSettings)
+)(withMsg(BasicSettings))

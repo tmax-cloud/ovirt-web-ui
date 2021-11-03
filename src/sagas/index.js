@@ -12,10 +12,10 @@ import { push } from 'connected-react-router'
 import Api, { Transforms } from '_/ovirtapi'
 import { saveToLocalStorage } from '_/storage'
 
+import sagasOptions from './options'
 import sagasRefresh from './background-refresh'
 import sagasDisks from './disks'
 import sagasLogin from './login'
-import sagasOptionsDialog from '_/components/OptionsDialog/sagas'
 import sagasRoles from './roles'
 import sagasStorageDomains from './storageDomains'
 import sagasVmChanges from './vmChanges'
@@ -29,6 +29,7 @@ import {
   vmActionInProgress,
 
   getSingleVm,
+  setUser,
   setVmSnapshots,
 
   setUserMessages,
@@ -53,6 +54,7 @@ import {
   entityPermissionsToUserPermits,
   foreach,
   fetchPermits,
+  mapCpuOptions,
   PermissionsType,
 } from './utils'
 
@@ -68,7 +70,6 @@ import {
 
 import {
   ADD_VM_NIC,
-  OPEN_CONSOLE_MODAL,
   CHECK_TOKEN_EXPIRED,
   CLEAR_USER_MSGS,
   DELAYED_REMOVE_ACTIVE_REQUEST,
@@ -81,12 +82,14 @@ import {
   GET_CONSOLE_OPTIONS,
   GET_POOLS,
   GET_RDP_VM,
+  GET_USER,
   GET_VMS,
+  NAVIGATE_TO_VM_DETAILS,
+  OPEN_CONSOLE_MODAL,
   SAVE_CONSOLE_OPTIONS,
   SAVE_FILTERS,
   SELECT_POOL_DETAIL,
   SELECT_VM_DETAIL,
-  NAVIGATE_TO_VM_DETAILS,
 } from '_/constants'
 
 import {
@@ -102,7 +105,7 @@ const VM_FETCH_ADDITIONAL_DEEP = [
   'cdroms',
   'disk_attachments.disk',
   'graphics_consoles',
-  'nics',
+  'nics.reporteddevices',
   'permissions',
   'sessions',
   'snapshots',
@@ -110,7 +113,7 @@ const VM_FETCH_ADDITIONAL_DEEP = [
 ]
 
 const VM_FETCH_ADDITIONAL_SHALLOW = [
-  'graphics_consoles',
+  'graphics_consoles', // for backward compatibility only (before 4.4.7)
 ]
 
 export const EVERYONE_GROUP_ID = 'eee00000-0000-0000-0000-123456789eee'
@@ -123,6 +126,15 @@ export function* transformAndPermitVm (vm) {
   internalVm.canUserEditVm = canUserEditVm(internalVm.userPermits)
   internalVm.canUserManipulateSnapshots = canUserManipulateSnapshots(internalVm.userPermits)
   internalVm.canUserEditVmStorage = canUserEditVmStorage(internalVm.userPermits)
+
+  // Map VM attribute derived config values to the VM. The mappings are based on the
+  // VM's custom compatibility version and CPU architecture.
+  const customCompatVer = internalVm.customCompatibilityVersion
+  if (customCompatVer) {
+    internalVm.cpuOptions = yield mapCpuOptions(customCompatVer, internalVm.cpu.arch)
+  } else {
+    internalVm.cpuOptions = null
+  }
 
   return internalVm
 }
@@ -270,6 +282,17 @@ export function* fetchPools (action) {
   return fetchedPoolIds
 }
 
+export function* fetchCurrentUser () {
+  const userId = yield select((state) => state.config.getIn(['user', 'id']))
+  const user = yield callExternalAction('user', Api.user, {
+    payload: {
+      userId,
+    },
+  })
+
+  yield put(setUser({ user: Transforms.User.toInternal({ user }) }))
+}
+
 export function* fetchSinglePool (action) {
   const { poolId } = action.payload
 
@@ -369,7 +392,6 @@ export function* startProgress ({ vmId, poolId, name }) {
 }
 
 export function* stopProgress ({ vmId, poolId, name, result }) {
-  const actionInProgress = vmId ? vmActionInProgress : poolActionInProgress
   if (result && result.status === 'complete') {
     vmId = vmId || result.vm.id
     // do not call 'end of in progress' if successful,
@@ -381,6 +403,7 @@ export function* stopProgress ({ vmId, poolId, name, result }) {
     yield getSingleInstance({ vmId, poolId })
   }
 
+  const actionInProgress = vmId ? vmActionInProgress : poolActionInProgress
   yield put(actionInProgress(Object.assign(vmId ? { vmId } : { poolId }, { name, started: false })))
 }
 
@@ -552,6 +575,7 @@ export function* rootSaga () {
     throttle(100, GET_BY_PAGE, fetchByPage),
     throttle(100, GET_VMS, fetchVms),
     throttle(100, GET_POOLS, fetchPools),
+    takeLatest(GET_USER, fetchCurrentUser),
 
     takeLatest(GET_ALL_EVENTS, fetchAllEvents),
     takeEvery(DISMISS_EVENT, dismissEvent),
@@ -575,9 +599,9 @@ export function* rootSaga () {
 
     // Sagas from Components
     ...sagasDisks,
-    ...sagasOptionsDialog,
     ...sagasRoles,
     ...sagasStorageDomains,
+    ...sagasOptions,
     ...sagasVmChanges,
     ...sagasVmSnapshots,
   ])

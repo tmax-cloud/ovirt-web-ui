@@ -1,12 +1,16 @@
 import Api, { Transforms } from '_/ovirtapi'
-import { put, select, takeLatest } from 'redux-saga/effects'
+import { put, select, takeLatest, all, call } from 'redux-saga/effects'
 import {
   canUserUseTemplate,
   canUserUseCluster,
   canUserUseVnicProfile,
 } from '_/utils'
 
-import { callExternalAction, entityPermissionsToUserPermits } from './utils'
+import {
+  callExternalAction,
+  entityPermissionsToUserPermits,
+  mapCpuOptions,
+} from './utils'
 
 import {
   setClusters,
@@ -41,6 +45,11 @@ export function* fetchAllClusters (action) {
     for (const cluster of clustersInternal) {
       cluster.userPermits = yield entityPermissionsToUserPermits(cluster)
       cluster.canUserUseCluster = canUserUseCluster(cluster.userPermits)
+    }
+
+    // Map cluster attribute derived config values to the clusters
+    for (const cluster of clustersInternal) {
+      cluster.cpuOptions = yield mapCpuOptions(cluster.version, cluster.architecture)
     }
 
     yield put(setClusters(clustersInternal))
@@ -86,6 +95,15 @@ export function* fetchAllTemplates (action) {
       template.canUserUseTemplate = canUserUseTemplate(template.userPermits)
     }
 
+    // Map template attribute derived config values to the templates
+    for (const template of templatesInternal) {
+      const customCompatVer = template.customCompatibilityVersion
+
+      template.cpuOptions = customCompatVer
+        ? yield mapCpuOptions(customCompatVer, template.cpu.arch)
+        : null
+    }
+
     yield put(setTemplates(templatesInternal))
   }
 }
@@ -108,16 +126,49 @@ export function* fetchAllVnicProfiles (action) {
   }
 }
 
+/**
+ * Fetch the user's ovirt known groups by fetching and cross referencing the users's
+ * domain groups with the ovirt known groups.  Permission checks require ovirt group
+ * uuids, not the domain entity ids.
+ *
+ * Users can belong to more domain groups than ovirt groups.  The ovirt group fetch will
+ * return all groups the user can SEE but does not contain any membership information.
+ * The cross reference will turn domain groups membership into ovirt group membership.
+ * ovirt group uuids are stored in state.
+ */
 export function* fetchUserGroups () {
   const userId = yield select(state => state.config.getIn(['user', 'id']))
-  const groups = yield callExternalAction('groups', Api.groups, { payload: { userId } })
 
-  if (groups && groups['group']) {
-    const groupsInternal = groups.group.map(group => group.id)
-    groupsInternal.push(EVERYONE_GROUP_ID)
+  const {
+    domainGroups,
+    ovirtGroups,
+  } = yield all({
+    domainGroups: call(function* (userId) {
+      const { group: groups = [] } = yield callExternalAction('userDomainGroups', Api.userDomainGroups, { payload: { userId } })
+      return groups.map(group => group.id)
+    }, userId),
 
-    yield put(setUserGroups({ groups: groupsInternal }))
-  }
+    ovirtGroups: call(function* () {
+      const { group: groups = [] } = yield callExternalAction('groups', Api.groups)
+      return groups.map(group => ({
+        domainEntryId: group.domain_entry_id,
+        ovirtId: group.id,
+      }))
+    }),
+  })
+
+  // Cross reference domainGroups with ovirtGroups to hold on to ovirt group
+  // ids that the user is a member of
+  const groupIds = []
+  groupIds.push(EVERYONE_GROUP_ID)
+
+  ovirtGroups.forEach(ovirtGroup => {
+    if (domainGroups.includes(ovirtGroup.domainEntryId)) {
+      groupIds.push(ovirtGroup.ovirtId)
+    }
+  })
+
+  yield put(setUserGroups({ groups: groupIds }))
 }
 
 export default [

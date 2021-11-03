@@ -1,9 +1,10 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import PropTypes from 'prop-types'
 import { Modal, Button, Alert } from 'patternfly-react'
-import { msg } from '_/intl'
+import { MsgContext } from '_/intl'
 
 const NavigationConfirmationModal = ({ show, onYes, onNo }) => {
+  const { msg } = useContext(MsgContext)
   const idPrefix = 'close-dialog-confim'
 
   return (
@@ -15,8 +16,8 @@ const NavigationConfirmationModal = ({ show, onYes, onNo }) => {
         <Alert type='warning' id={`${idPrefix}-body-text`}>{msg.unsavedChangesConfirmMessage()}</Alert>
       </Modal.Body>
       <Modal.Footer>
-        <Button id={`${idPrefix}-button-no`} onClick={onNo} bsStyle='default'>No</Button>
-        <Button id={`${idPrefix}-button-yes`} onClick={onYes} bsStyle='primary'>Yes</Button>
+        <Button id={`${idPrefix}-button-no`} onClick={onNo} bsStyle='default'>{msg.no()}</Button>
+        <Button id={`${idPrefix}-button-yes`} onClick={onYes} bsStyle='primary'>{msg.yes()}</Button>
       </Modal.Footer>
     </Modal>
   )

@@ -1,16 +1,22 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import PropTypes from 'prop-types'
 import { connect } from 'react-redux'
 import { List } from 'immutable'
 
 import * as Actions from '_/actions'
-import { MAX_VM_MEMORY_FACTOR } from '_/constants'
-import { generateUnique, isWindows, templateNameRenderer, userFormatOfBytes } from '_/helpers'
-import { msg, enumMsg } from '_/intl'
-
+import { MAX_VM_MEMORY_FACTOR, MAX_VM_VCPU_EDIT } from '_/constants'
 import {
-  isNumber,
-} from '_/utils'
+  filterOsByArchitecture,
+  generateUnique,
+  getClusterArchitecture,
+  getDefaultOSByArchitecture,
+  isWindows,
+  templateNameRenderer,
+  userFormatOfBytes,
+  buildMessageFromRecord,
+} from '_/helpers'
+import { enumMsg, MsgContext, withMsg } from '_/intl'
+import { isNumber, isNumberInRange } from '_/utils'
 
 import {
   canChangeCluster as vmCanChangeCluster,
@@ -29,11 +35,12 @@ import {
 import {
   Alert,
   ExpandCollapse,
-  FieldLevelHelp,
   FormControl,
   Icon,
 } from 'patternfly-react'
-import Switch from '_/components/Switch'
+
+import { Switch } from '@patternfly/react-core'
+
 import SelectBox from '_/components/SelectBox'
 import BaseCard from '../../BaseCard'
 
@@ -46,15 +53,15 @@ import CloudInit from './CloudInit'
 import HotPlugChangeConfirmationModal from './HotPlugConfirmationModal'
 import NextRunChangeConfirmationModal from './NextRunChangeConfirmationModal'
 import FieldRow from './FieldRow'
-import OverlayTooltip from '_/components/OverlayTooltip'
+import { Tooltip, InfoTooltip } from '_/components/tooltips'
 
 import timezones from '_/components/utils/timezones.json'
 
-function rephraseVmType (vmType) {
+function rephraseVmType (vmType, msg) {
   const types = {
     'desktop': msg.vmType_desktop(),
     'server': msg.vmType_server(),
-    'highperformance': msg.vmType_highPerformance(),
+    'high_performance': msg.vmType_highPerformance(),
   }
 
   const type = vmType.toLowerCase()
@@ -69,26 +76,30 @@ function rephraseVmType (vmType) {
  * Render "N/A" with an optional tooltip for any field that won't have a value
  * based on the state of the VM.
  */
-const NotAvailable = ({ tooltip, id }) => (
-  <div>
-    { tooltip
-      ? (
-        <OverlayTooltip id={id} tooltip={tooltip} placement='top'>
-          <span>{msg.notAvailable()}</span>
-        </OverlayTooltip>
-      )
-      : (
-        <span id={id}>{msg.notAvailable()}</span>
-      )
-    }
-  </div>
-)
+const NotAvailable = ({ tooltip, id }) => {
+  const { msg } = useContext(MsgContext)
+  return (
+    <div>
+      { tooltip
+        ? (
+          <Tooltip id={id} tooltip={tooltip}>
+            <span>{msg.notAvailable()}</span>
+          </Tooltip>
+        )
+        : (
+          <span id={id}>{msg.notAvailable()}</span>
+        )
+      }
+    </div>
+  )
+}
 NotAvailable.propTypes = {
   tooltip: PropTypes.string,
   id: PropTypes.string.isRequired,
 }
 
 const DEFAULT_BOOT_DEVICES = List(['hd', null])
+const DEFAULT_GMT_TIMEZONE = timezones.find(timezone => timezone.value.startsWith('(GMT) Greenwich')).id
 
 /*
  * Specific information and details of the VM (status/up-time, data center, cluster,
@@ -98,11 +109,13 @@ const DEFAULT_BOOT_DEVICES = List(['hd', null])
 class DetailsCard extends React.Component {
   constructor (props) {
     super(props)
-    const vmClusterId = props.vm.getIn(['cluster', 'id'])
-    const vmDataCenterId = props.clusters.getIn([vmClusterId, 'dataCenterId'])
+    const { vm, clusters, operatingSystems, locale } = props
+    const vmClusterId = vm.getIn(['cluster', 'id'])
+    const vmDataCenterId = clusters.getIn([vmClusterId, 'dataCenterId'])
+    const clusterArchitecture = getClusterArchitecture(vmClusterId, clusters)
 
     this.state = {
-      vm: props.vm, // ImmutableJS Map
+      vm, // ImmutableJS Map
 
       isEditing: false,
       isDirty: false,
@@ -111,10 +124,12 @@ class DetailsCard extends React.Component {
 
       promptHotPlugChanges: false,
       promptNextRunChanges: false,
-
       isoList: createIsoList(props.storageDomains, vmDataCenterId),
-      clusterList: createClusterList(props.clusters),
-      osList: createOsList(vmClusterId, props.clusters, props.operatingSystems),
+      clusterList: createClusterList({ clusters, dataCenterId: vmDataCenterId, architecture: clusterArchitecture, locale }),
+      osList: createOsList({ clusterId: vmClusterId, clusters, operatingSystems, locale }),
+
+      enableInitTimezone: !!vm.getIn(['cloudInit', 'timezone']), // true if sysprep timezone set or Configure Timezone checkbox checked
+      lastInitTimezone: vm.getIn(['cloudInit', 'timezone']) || DEFAULT_GMT_TIMEZONE,
     }
     this.trackUpdates = {}
     this.hotPlugUpdates = {}
@@ -134,6 +149,7 @@ class DetailsCard extends React.Component {
     this.handleHotPlugOnApplyLater = this.handleHotPlugOnApplyLater.bind(this)
     this.handleHotPlugOnApplyNow = this.handleHotPlugOnApplyNow.bind(this)
 
+    this.grabCpuOptions = this.grabCpuOptions.bind(this)
     this.updateOs = this.updateOs.bind(this)
   }
 
@@ -169,14 +185,17 @@ class DetailsCard extends React.Component {
     // NOTE: Doing the following here instead of getDerivedStateFromProps so __clusters__,
     //       __storageDomains__, and __operatingSystems__ don't need to be kept in state for
     //       change comparison
-    const vmClusterId = this.props.vm.getIn(['cluster', 'id'])
+    const { clusters, vm, operatingSystems, locale } = this.props
+    const vmClusterId = vm.getIn(['cluster', 'id'])
+    const vmDataCenterId = clusters.getIn([vmClusterId, 'dataCenterId'])
+    const clusterArchitecture = getClusterArchitecture(vmClusterId, clusters)
 
     if (prevProps.clusters !== this.props.clusters) {
-      this.setState({ clusterList: createClusterList(this.props.clusters) }) // eslint-disable-line react/no-did-update-set-state
+      const { clusters } = this.props
+      this.setState({ clusterList: createClusterList({ clusters, dataCenterId: vmDataCenterId, architecture: clusterArchitecture, locale }) }) // eslint-disable-line react/no-did-update-set-state
     }
 
     if (prevProps.storageDomains !== this.props.storageDomains) {
-      const vmDataCenterId = this.props.clusters.getIn([vmClusterId, 'dataCenterId'])
       this.setState({ isoList: createIsoList(this.props.storageDomains, vmDataCenterId) }) // eslint-disable-line react/no-did-update-set-state
     }
 
@@ -184,7 +203,7 @@ class DetailsCard extends React.Component {
       prevProps.clusters !== this.props.clusters ||
       prevProps.vm.getIn(['cluster', 'id']) !== vmClusterId
     ) {
-      this.setState({ osList: createOsList(vmClusterId, this.props.clusters, this.props.operatingSystems) }) // eslint-disable-line react/no-did-update-set-state
+      this.setState({ osList: createOsList({ clusterId: vmClusterId, clusters, operatingSystems, locale }) }) // eslint-disable-line react/no-did-update-set-state
     }
   }
 
@@ -227,44 +246,67 @@ class DetailsCard extends React.Component {
     return updates
   }
 
+  grabCpuOptions () {
+    const { vm } = this.state
+    const cluster = this.props.clusters.get(vm.getIn(['cluster', 'id']))
+
+    const cpuOptions = vm.get('cpuOptions') || cluster.get('cpuOptions')
+    return {
+      maxNumOfSockets: cpuOptions.get('maxNumOfSockets'),
+      maxNumOfCores: cpuOptions.get('maxNumOfCores'),
+      maxNumOfThreads: cpuOptions.get('maxNumOfThreads'),
+      maxNumOfVmCpus: cpuOptions.get('maxNumOfVmCpus'),
+    }
+  }
+
   handleChange (fieldName, value, additionalArgs) {
     if (this.state.isEditing && !this.state.isDirty) {
       this.props.onEditChange(true, true)
     }
 
     let updates = this.state.vm
+
+    const { enableInitTimezone, lastInitTimezone } = this.state
+    let initTimezoneUpdates = { enableInitTimezone, lastInitTimezone }
+
     const changeQueue = [{ fieldName, value }]
-    const { maxNumberOfSockets, maxNumberOfCores, maxNumberOfThreads } = this.props
+    const {
+      operatingSystems,
+      clusters,
+      templates,
+    } = this.props
 
     for (let change = changeQueue.shift(); change; change = changeQueue.shift()) {
       console.log('processing change', change)
       const { fieldName, value } = change
+      const {
+        maxNumOfSockets,
+        maxNumOfCores,
+        maxNumOfThreads,
+        maxNumOfVmCpus,
+      } = this.grabCpuOptions()
 
       let fieldUpdated
       switch (fieldName) {
         case 'cluster':
-          updates = updates.set('cluster', this.props.clusters.get(value))
+          updates = updates.set('cluster', clusters.get(value))
           fieldUpdated = 'cluster'
-
-          // Change the template to 'Blank' if the VM's template isn't in the new cluster
-          {
-            const template = this.props.templates.get(updates.getIn(['template', 'id']))
-            if (template && template.get('clusterId') && template.get('clusterId') !== value) {
-              changeQueue.push({ fieldName: 'template', value: this.props.blankTemplateId })
-            }
-          }
           break
 
         case 'template':
-          updates = updates.set('template', this.props.templates.get(value))
+          updates = updates.set('template', templates.get(value))
           fieldUpdated = 'template'
 
           // Apply settings from the template to the VM (memory, CPUs, OS, cloudInit, bootMenuEnabled)
           {
-            const template = this.props.templates.get(value)
+            const template = templates.get(value)
             if (template) {
-              const templateOsType = template.getIn(['os', 'type'], 'other')
-              const templateOs = this.props.operatingSystems.find(os => os.get('type') === templateOsType)
+              const clusterId = updates.getIn(['cluster', 'id'])
+              const clusterArchitecture = getClusterArchitecture(clusterId, clusters)
+              const templateOsName = template.getIn(['os', 'type'], 'other')
+              const templateOs = filterOsByArchitecture(operatingSystems, clusterArchitecture)
+                .find(os => os.get('name') === templateOsName) ||
+                getDefaultOSByArchitecture(operatingSystems, clusterArchitecture)
 
               // fields that are editable on the card
               changeQueue.push(
@@ -298,6 +340,8 @@ class DetailsCard extends React.Component {
 
         case 'cloudInitEnabled':
           updates = updates.setIn(['cloudInit', 'enabled'], value)
+          // when sysprep enabled and Configure Timezone checkbox checked, set the sysprep timezone to the last selected one
+          updates = updates.setIn(['cloudInit', 'timezone'], value && enableInitTimezone ? lastInitTimezone : '')
           fieldUpdated = 'cloudInit'
           break
 
@@ -313,6 +357,7 @@ class DetailsCard extends React.Component {
 
         case 'cloudInitTimezone':
           updates = updates.setIn(['cloudInit', 'timezone'], value)
+          initTimezoneUpdates.lastInitTimezone = value // remember the actual change of the sysprep timezone
           fieldUpdated = 'cloudInit'
           break
 
@@ -326,9 +371,14 @@ class DetailsCard extends React.Component {
           fieldUpdated = 'cloudInit'
           break
 
+        case 'enableInitTimezone': // Configure Timezone checkbox change
+          updates = updates.setIn(['cloudInit', 'timezone'], value ? lastInitTimezone : '')
+          initTimezoneUpdates.enableInitTimezone = value
+          fieldUpdated = 'cloudInit'
+          break
+
         case 'os':
           fieldUpdated = 'os'
-          const operatingSystems = this.props.operatingSystems
           const os = operatingSystems.find(os => os.get('id') === value)
           updates = this.updateOs(updates, os)
 
@@ -358,15 +408,16 @@ class DetailsCard extends React.Component {
           break
 
         case 'cpu':
-          if (isNumber(value) && value > 0 && value <= this.props.maxNumOfVmCpus) {
+          // Allow a value that is too large in case the max total changes due to a Cluster change
+          if (isNumber(value) && value > 0 && value <= MAX_VM_VCPU_EDIT) {
             let topology = { sockets: value, cores: 1, threads: 1 }
-            if (value > maxNumberOfSockets) {
+            if (value > maxNumOfSockets && value <= maxNumOfVmCpus) {
               topology = getTopology({
                 value,
                 max: {
-                  sockets: maxNumberOfSockets,
-                  cores: maxNumberOfCores,
-                  threads: maxNumberOfThreads,
+                  sockets: maxNumOfSockets,
+                  cores: maxNumOfCores,
+                  threads: maxNumOfThreads,
                 },
               })
             }
@@ -385,9 +436,9 @@ class DetailsCard extends React.Component {
           let topology = getTopology({
             value: this.state.vm.getIn(['cpu', 'vCPUs']),
             max: {
-              sockets: maxNumberOfSockets,
-              cores: maxNumberOfCores,
-              threads: maxNumberOfThreads,
+              sockets: maxNumOfSockets,
+              cores: maxNumOfCores,
+              threads: maxNumOfThreads,
             },
             force: {
               [additionalArgs.vcpu]: parseInt(value),
@@ -410,6 +461,7 @@ class DetailsCard extends React.Component {
             this.hotPlugUpdates['memory'] = true
           }
           break
+
         case 'timeZone':
           updates = updates.mergeDeep({
             timeZone: {
@@ -422,13 +474,21 @@ class DetailsCard extends React.Component {
 
       if (updates !== this.state.vm) {
         this.trackUpdates[fieldUpdated] = true
-        this.setState({ vm: updates, isDirty: true })
+        this.setState({ vm: updates, isDirty: true, ...initTimezoneUpdates })
       }
     } // for
   }
 
   handleCardOnCancel () {
-    this.setState({ isEditing: false, isDirty: false, correlationId: null, correlatedMessages: null })
+    const cloudInitTimezone = this.props.vm.getIn(['cloudInit', 'timezone'])
+    this.setState({
+      isEditing: false,
+      isDirty: false,
+      correlationId: null,
+      correlatedMessages: null,
+      lastInitTimezone: cloudInitTimezone || DEFAULT_GMT_TIMEZONE,
+      enableInitTimezone: !!cloudInitTimezone,
+    })
     this.props.onEditChange(false)
   }
 
@@ -437,6 +497,18 @@ class DetailsCard extends React.Component {
 
     if (Object.keys(this.trackUpdates).length === 0) {
       this.handleCardOnCancel()
+      return
+    }
+
+    // Note: The validations may already be done elsewhere, and the save button should
+    //       only be active if the card fields are valid, but repeat them here to be
+    //       sure.
+    // Run field validations. If any input field is not valid, don't allow the save.
+    const { maxNumOfVmCpus } = this.grabCpuOptions()
+    const vCpuCount = this.state.vm.getIn(['cpu', 'vCPUs'])
+    const vCpuCountIsValid = isNumberInRange(vCpuCount, 0, maxNumOfVmCpus)
+
+    if (!vCpuCountIsValid) {
       return
     }
 
@@ -487,6 +559,10 @@ class DetailsCard extends React.Component {
 
     if (this.trackUpdates['cloudInit']) {
       vmUpdates['cloudInit'] = stateVm.get('cloudInit').toJS()
+      this.setState({
+        enableInitTimezone: vmUpdates['cloudInit'].enabled,
+        lastInitTimezone: vmUpdates['cloudInit'].timezone || DEFAULT_GMT_TIMEZONE,
+      })
     }
 
     if (this.trackUpdates['timeZone']) {
@@ -573,11 +649,12 @@ class DetailsCard extends React.Component {
   }
 
   render () {
-    const { hosts, clusters, dataCenters, templates, operatingSystems, vms, isAdmin } = this.props
+    const { hosts, clusters, dataCenters, templates, operatingSystems, vms, isAdmin, msg } = this.props
     const { vm, isEditing, correlatedMessages, clusterList, isoList } = this.state
 
     const idPrefix = 'vmdetail-details'
 
+    const showIPs = vm.get('status') === 'up'
     const isPoolVm = vm.getIn(['pool', 'id']) !== undefined
     const canEditDetails = vm.get('canUserEditVm') && !isPoolVm
     let pool = null
@@ -591,8 +668,13 @@ class DetailsCard extends React.Component {
     const hostName = hosts && hosts.getIn([vm.get('hostId'), 'name'])
 
     // IP Addresses
-    const ip4Addresses = !vm.has('nics') ? [] : vm.get('nics').reduce((ipSet, nic) => [...ipSet, ...nic.get('ipv4')], [])
-    const ip6Addresses = !vm.has('nics') ? [] : vm.get('nics').reduce((ipSet, nic) => [...ipSet, ...nic.get('ipv6')], [])
+    const ip4Addresses = [...(new Set(!vm.has('nics') || !showIPs
+      ? []
+      : vm.get('nics').reduce((ipSet, nic) => [...ipSet, ...nic.get('ipv4')], [])))]
+    const ip6Addresses = [...(new Set(
+      !vm.has('nics') || !showIPs
+        ? []
+        : vm.get('nics').reduce((ipSet, nic) => [...ipSet, ...nic.get('ipv6')], [])))]
 
     // FQDN
     const fqdn = vm.get('fqdn')
@@ -627,21 +709,26 @@ class DetailsCard extends React.Component {
     const bootMenuEnabled = vm.get('bootMenuEnabled')
 
     // Optimized for
-    const optimizedFor = rephraseVmType(vm.get('type'))
+    const optimizedFor = rephraseVmType(vm.get('type'), msg)
 
-    // VCPU
+    // vCPU
     const SOCKETS_VCPU = 'sockets'
     const CORES_VCPU = 'cores'
     const THREADS_VCPU = 'threads'
+    const { maxNumOfSockets, maxNumOfCores, maxNumOfThreads, maxNumOfVmCpus } = this.grabCpuOptions()
+
     const vCpuCount = vm.getIn(['cpu', 'vCPUs'])
+    const vCpuCountIsValid = isNumberInRange(vCpuCount, 0, maxNumOfVmCpus)
+
     const vCpuTopology = vm.getIn(['cpu', 'topology'])
-    const { maxNumberOfSockets, maxNumberOfCores, maxNumberOfThreads } = this.props
-    const vCpuTopologyDividers = getTopologyPossibleValues({
-      value: vCpuCount,
-      maxNumberOfSockets: maxNumberOfSockets,
-      maxNumberOfCores: maxNumberOfCores,
-      maxNumberOfThreads: maxNumberOfThreads,
-    })
+    const vCpuTopologyDividers = vCpuCountIsValid
+      ? getTopologyPossibleValues({
+        value: vCpuCount,
+        maxNumOfSockets,
+        maxNumOfCores,
+        maxNumOfThreads,
+      })
+      : { sockets: [1], cores: [1], threads: [1] }
 
     // Boot devices
     const allowedBootDevices = ['hd', 'network', 'cdrom']
@@ -679,8 +766,10 @@ class DetailsCard extends React.Component {
         editable={canEditDetails || canChangeCd}
         disableTooltip={isPoolVm && isPoolAutomatic ? msg.automaticPoolsNotEditable({ poolName: pool.get('name') }) : undefined}
         editMode={isEditing}
+        editTooltip={msg.edit()}
+        editTooltipPlacement={'bottom'}
         idPrefix={idPrefix}
-        editTooltip={msg.cardTooltipEditDetails({ vmName: vm.get('name') })}
+        disableSaveButton={!vCpuCountIsValid}
         onStartEdit={this.handleCardOnStartEdit}
         onCancel={this.handleCardOnCancel}
         onSave={this.handleCardOnSave}
@@ -699,7 +788,7 @@ class DetailsCard extends React.Component {
                         {<EllipsisValue tooltip={hostName}>{hostName}</EllipsisValue> || <NotAvailable tooltip={msg.notAvailableUntilRunning()} id={`${idPrefix}-host-not-available`} />}
                       </FieldRow>
                     }
-                    <FieldRow label={msg.ipAddress()} id={`${idPrefix}-ip`}>
+                    <FieldRow label={msg.ipAddress()} id={`${idPrefix}-ip`} >
                       <React.Fragment>
                         { ip4Addresses.length === 0 && ip6Addresses.length === 0 &&
                           <NotAvailable tooltip={msg.notAvailableUntilRunningAndGuestAgent()} id={`${idPrefix}-ip-not-available`} />
@@ -723,31 +812,24 @@ class DetailsCard extends React.Component {
                     <FieldRow label={msg.fqdn()} id={`${idPrefix}-fqdn`}>
                       { <EllipsisValue tooltip={fqdn}>{fqdn}</EllipsisValue> || <NotAvailable tooltip={msg.notAvailableUntilRunningAndGuestAgent()} id={`${idPrefix}-fqdn-not-available`} /> }
                     </FieldRow>
-                    <FieldRow label={msg.cluster()} id={`${idPrefix}-cluster`}>
+                    <FieldRow label={msg.cluster()} id={`${idPrefix}-cluster`} tooltip={isFullEdit && !canChangeCluster && msg.clusterCanOnlyChangeWhenVmStopped()} >
                       { !isFullEdit && clusterName }
                       { isFullEdit && !canChangeCluster &&
                         <div>
                           {clusterName}
-                          <FieldLevelHelp disabled={false} content={msg.clusterCanOnlyChangeWhenVmStopped()} inline />
                         </div>
                       }
                       { isFullEdit && canChangeCluster &&
                         <SelectBox
                           id={`${idPrefix}-cluster-edit`}
-                          items={clusterList.filter(cluster => cluster.datacenter === dataCenterId)}
+                          items={clusterList}
                           selected={clusterId}
                           onChange={(selectedId) => { this.handleChange('cluster', selectedId) }}
                         />
                       }
                     </FieldRow>
-                    <FieldRow label={msg.dataCenter()} id={`${idPrefix}-data-center`}>
-                      { !isFullEdit && dataCenterName }
-                      { isFullEdit &&
-                        <div>
-                          {dataCenterName}
-                          <FieldLevelHelp disabled={false} content={msg.dataCenterChangesWithCluster()} inline />
-                        </div>
-                      }
+                    <FieldRow label={msg.dataCenter()} tooltip={isFullEdit && msg.dataCenterChangesWithCluster()} id={`${idPrefix}-data-center`}>
+                      {dataCenterName}
                     </FieldRow>
                   </Grid>
                 </Col>
@@ -756,12 +838,11 @@ class DetailsCard extends React.Component {
                     <FieldRow label={msg.template()} id={`${idPrefix}-template`}>
                       { templateName }
                     </FieldRow>
-                    <FieldRow label={isEditing ? msg.changeCd() : msg.cd()} id={`${idPrefix}-cdrom`}>
+                    <FieldRow label={msg.cd()} id={`${idPrefix}-cdrom`} tooltip={isEditing && !canChangeCd && msg.cdCanOnlyChangeWhenVmRunning()} >
                       { !isEditing && <EllipsisValue tooltip={cdImageName}>{cdImageName}</EllipsisValue> }
                       { isEditing && !canChangeCd &&
                         <div>
                           <EllipsisValue tooltip={cdImageName}>{cdImageName}</EllipsisValue>
-                          <FieldLevelHelp disabled={false} content={msg.cdCanOnlyChangeWhenVmRunning()} inline />
                         </div>
                       }
                       { isEditing && canChangeCd &&
@@ -782,13 +863,13 @@ class DetailsCard extends React.Component {
                     <FieldRow label={isOsWindows ? msg.sysprep() : msg.cloudInit()} id={`${idPrefix}-cloud-init`}>
                       <div className={style['cloud-init-field']}>
                         {cloudInitEnabled ? <Icon type='pf' name='on' /> : <Icon type='pf' name='off' />}
-                        {enumMsg('Switch', cloudInitEnabled ? 'on' : 'off')}
+                        {enumMsg('Switch', cloudInitEnabled ? 'on' : 'off', msg)}
                       </div>
                     </FieldRow>
                     <FieldRow label={msg.bootMenu()} id={`${idPrefix}-boot-menu-readonly`}>
                       <div className={style['boot-menu-field']}>
                         {bootMenuEnabled ? <Icon type='pf' name='on' /> : <Icon type='pf' name='off' />}
-                        {enumMsg('Switch', bootMenuEnabled ? 'on' : 'off')}
+                        {enumMsg('Switch', bootMenuEnabled ? 'on' : 'off', msg)}
                       </div>
                     </FieldRow>
 
@@ -800,12 +881,17 @@ class DetailsCard extends React.Component {
                       label={msg.cpus()}
                       id={`${idPrefix}-cpus`}
                       tooltip={
-                        msg.totalCpuTooltip({
-                          sockets: vCpuTopology.get('sockets'),
-                          cores: vCpuTopology.get('cores'),
-                          threads: vCpuTopology.get('threads'),
-                        })
-                      }>
+                        <div>
+                          <span>The total virtual CPUs include:</span>
+                          <ul className={style['cpu-tooltip-list']} >
+                            <li>{msg.totalSocketsCpuTooltipMessage({ number: vCpuTopology.get('sockets') })}</li>
+                            <li>{msg.totalCoresCpuTooltipMessage({ number: vCpuTopology.get('cores') })}</li>
+                            <li>{msg.totalThreadsCpuTooltipMessage({ number: vCpuTopology.get('threads') })}</li>
+                          </ul>
+                        </div>
+                      }
+                      validationState={vCpuCountIsValid ? null : 'error'}
+                    >
                       { !isFullEdit && vCpuCount }
                       { isFullEdit &&
                         <div>
@@ -813,9 +899,16 @@ class DetailsCard extends React.Component {
                             id={`${idPrefix}-cpus-edit`}
                             className={style['cpu-input']}
                             type='number'
+                            min={1}
+                            max={MAX_VM_VCPU_EDIT}
                             value={vCpuCount}
                             onChange={e => this.handleChange('cpu', e.target.value)}
                           />
+                          { !vCpuCountIsValid &&
+                            <div className={style['cpu-input-error']}>
+                              {msg.maxAllowedCpus({ max: maxNumOfVmCpus })}
+                            </div>
+                          }
                         </div>
                       }
                     </FieldRow>
@@ -838,6 +931,7 @@ class DetailsCard extends React.Component {
                 </Col>
               </Row>
             </Grid>
+
             {/* Advanced options */}
             { isFullEdit && <ExpandCollapse id={`${idPrefix}-advanced-options`} textCollapsed={msg.advancedOptions()} textExpanded={msg.advancedOptions()}>
               <Grid className={style['details-container']}>
@@ -856,13 +950,11 @@ class DetailsCard extends React.Component {
                       <FieldRow label={msg.bootMenu()} id={`${idPrefix}-boot-menu`}>
                         <Switch
                           id={`${idPrefix}-boot-menu-edit`}
-                          handleWidth={30}
-                          bsSize='mini'
-                          value={bootMenuEnabled}
-                          onChange={(e, state) => { this.handleChange('bootMenuEnabled', state) }}
+                          isChecked={bootMenuEnabled}
+                          onChange={state => this.handleChange('bootMenuEnabled', state)}
                         />
                       </FieldRow>
-                      <CloudInit idPrefix={idPrefix} vm={vm} onChange={this.handleChange} isWindows={isOsWindows} />
+                      <CloudInit idPrefix={idPrefix} vm={vm} onChange={this.handleChange} isWindows={isOsWindows} lastInitTimezone={this.state.lastInitTimezone} />
                     </Grid>
                   </Col>
                   {/* Second column */}
@@ -873,7 +965,7 @@ class DetailsCard extends React.Component {
                         <Col cols={12} className={style['col-label']}>
                           <div>
                             <span>{msg.bootOrder()}</span>
-                            <FieldLevelHelp content={msg.bootSequenceTooltip()} inline />
+                            <InfoTooltip id={`${idPrefix}-edit-boot-order-tooltip`} tooltip={msg.selectTheBootableDeviceTooltip()} />
                           </div>
                         </Col>
                       </Row>
@@ -904,7 +996,7 @@ class DetailsCard extends React.Component {
                           onChange={(selectedId) => { this.handleChange('bootDevices', selectedId, { device: SECOND_DEVICE }) }}
                         />
                       </FieldRow>
-                      {/* VCPU Topology */}
+                      {/* vCPU Topology */}
                       <Row className={style['field-row-divide']}>
                         <Col cols={12} className={style['col-label']}>
                           <div>
@@ -919,6 +1011,7 @@ class DetailsCard extends React.Component {
                             id: i.toString(),
                             value: i.toString(),
                           }))}
+                          disabled={!vCpuCountIsValid}
                           selected={vCpuTopology.get('sockets').toString()}
                           onChange={(selectedId) => { this.handleChange('topology', selectedId, { vcpu: SOCKETS_VCPU }) }}
                         />
@@ -930,6 +1023,7 @@ class DetailsCard extends React.Component {
                             id: i.toString(),
                             value: i.toString(),
                           }))}
+                          disabled={!vCpuCountIsValid}
                           selected={vCpuTopology.get('cores').toString()}
                           onChange={(selectedId) => { this.handleChange('topology', selectedId, { vcpu: CORES_VCPU }) }}
                         />
@@ -939,7 +1033,7 @@ class DetailsCard extends React.Component {
                         id={`${idPrefix}-vcpu-topology-threads`}
                         tooltip={
                           isClusterPower8
-                            ? msg.recomendedPower8ValuesForThreads({ threads: maxNumberOfThreads })
+                            ? msg.recomendedPower8ValuesForThreads({ threads: maxNumOfThreads })
                             : msg.recomendedValuesForThreads()
                         }>
                         <SelectBox
@@ -948,6 +1042,7 @@ class DetailsCard extends React.Component {
                             id: i.toString(),
                             value: i.toString(),
                           }))}
+                          disabled={!vCpuCountIsValid}
                           selected={vCpuTopology.get('threads').toString()}
                           onChange={(selectedId) => { this.handleChange('topology', selectedId, { vcpu: THREADS_VCPU }) }}
                         />
@@ -960,7 +1055,7 @@ class DetailsCard extends React.Component {
 
             { correlatedMessages && correlatedMessages.size > 0 &&
               correlatedMessages.map((message, key) =>
-                <Alert key={`user-message-${key}`} type='error' style={{ margin: '5px 0 0 0' }}>{message.get('message')}</Alert>
+                <Alert key={`user-message-${key}`} type='error' style={{ margin: '5px 0 0 0' }}>{buildMessageFromRecord(message.toJS(), msg)}</Alert>
               )
             }
           </React.Fragment>
@@ -969,12 +1064,12 @@ class DetailsCard extends React.Component {
     </React.Fragment>
   }
 }
+
 DetailsCard.propTypes = {
   vm: PropTypes.object.isRequired,
   vms: PropTypes.object.isRequired,
   onEditChange: PropTypes.func,
 
-  blankTemplateId: PropTypes.string.isRequired,
   hosts: PropTypes.object.isRequired,
   clusters: PropTypes.object.isRequired,
   dataCenters: PropTypes.object.isRequired,
@@ -985,17 +1080,15 @@ DetailsCard.propTypes = {
   isAdmin: PropTypes.bool.isRequired,
   defaultGeneralTimezone: PropTypes.string.isRequired,
   defaultWindowsTimezone: PropTypes.string.isRequired,
-  maxNumberOfSockets: PropTypes.number.isRequired,
-  maxNumberOfCores: PropTypes.number.isRequired,
-  maxNumberOfThreads: PropTypes.number.isRequired,
-  maxNumOfVmCpus: PropTypes.number.isRequired,
 
   saveChanges: PropTypes.func.isRequired,
+
+  msg: PropTypes.object.isRequired,
+  locale: PropTypes.string.isRequired,
 }
 
 const DetailsCardConnected = connect(
   (state) => ({
-    blankTemplateId: state.config.get('blankTemplateId'),
     vms: state.vms,
     hosts: state.hosts,
     clusters: state.clusters,
@@ -1007,10 +1100,6 @@ const DetailsCardConnected = connect(
     isAdmin: state.config.get('administrator'),
     defaultGeneralTimezone: state.config.get('defaultGeneralTimezone'),
     defaultWindowsTimezone: state.config.get('defaultWindowsTimezone'),
-    maxNumberOfSockets: state.config.get('maxNumberOfSockets'),
-    maxNumberOfCores: state.config.get('maxNumberOfCores'),
-    maxNumberOfThreads: state.config.get('maxNumberOfThreads'),
-    maxNumOfVmCpus: state.config.get('maxNumOfVmCpus'),
   }),
   (dispatch) => ({
     saveChanges: (minimalVmChanges, restartAfterEdit, nextRun, correlationId) =>
@@ -1019,6 +1108,6 @@ const DetailsCardConnected = connect(
         { correlationId }
       )),
   })
-)(DetailsCard)
+)(withMsg(DetailsCard))
 
 export default DetailsCardConnected

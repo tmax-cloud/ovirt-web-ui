@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import { connect } from 'react-redux'
 import PropTypes from 'prop-types'
 
@@ -7,19 +7,20 @@ import { DropdownButton, MenuItem, Icon } from 'patternfly-react'
 import ConsoleConfirmationModal from '../VmActions/ConsoleConfirmationModal'
 import { MenuItemAction } from '../VmActions/Action'
 import { DOWNLOAD_CONSOLE, RDP_ID } from '_/constants'
-import { msg } from '_/intl'
+import { MsgContext } from '_/intl'
 import { getRDP } from '_/actions'
-
+import { VNC } from '_/constants/console'
 import { isWindows } from '_/helpers'
 import style from './style.css'
 
 const VmConsoleSelector = ({ vmId, vms, consoles, config, consoleId, isConsolePage, onRDP }) => {
+  const { msg } = useContext(MsgContext)
   let actions = vms.getIn(['vms', vmId, 'consoles'])
   if (actions.size === 0) {
     return <div />
   }
 
-  const vnc = actions.find((a) => a.get('protocol') === 'vnc')
+  const vnc = actions.find((a) => a.get('protocol') === VNC)
 
   const consoleItems = actions.map(action =>
     <MenuItemAction
@@ -41,7 +42,7 @@ const VmConsoleSelector = ({ vmId, vms, consoles, config, consoleId, isConsolePa
       key={RDP_ID}
       onClick={(e) => { e.preventDefault(); onRDP({ domain, username, vms }) }}
     >
-      {msg.rdpConsole()} <Icon name='external-link' />
+      {msg.remoteDesktop()} <Icon name='external-link' />
     </MenuItem>)
   }
 
@@ -58,7 +59,7 @@ const VmConsoleSelector = ({ vmId, vms, consoles, config, consoleId, isConsolePa
   }
 
   const activeConsole = consoleId === RDP_ID
-    ? msg.rdpConsole()
+    ? msg.remoteDesktop()
     : consoles.getIn(['vms', vmId, 'consoleStatus']) === DOWNLOAD_CONSOLE
       ? msg[actions.find((a) => a.get('id') === consoleId).get('protocol') + 'Console']()
       : msg.vncConsoleBrowser()

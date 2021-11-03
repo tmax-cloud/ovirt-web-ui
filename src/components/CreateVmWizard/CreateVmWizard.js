@@ -6,16 +6,17 @@ import produce from 'immer'
 import { List } from 'immutable'
 
 import * as Actions from '_/actions'
-import { generateUnique } from '_/helpers'
-import { msg } from '_/intl'
-import { createTemplateList } from '_/components/utils'
+import { EMPTY_VNIC_PROFILE_ID } from '_/constants'
+import { generateUnique, buildMessageFromRecord } from '_/helpers'
+import { withMsg } from '_/intl'
+import { handleClusterIdChange } from './helpers'
+import { createStorageDomainList, createClusterList } from '_/components/utils'
 
 import NavigationConfirmationModal from '../NavigationConfirmationModal'
 import BasicSettings from './steps/BasicSettings'
 import Networking from './steps/Networking'
 import Storage from './steps/Storage'
 import SummaryReview from './steps/SummaryReview'
-import { EMPTY_VNIC_PROFILE_ID } from '_/constants'
 
 const DEFAULT_STATE = {
   activeStepIndex: 0,
@@ -28,6 +29,11 @@ const DEFAULT_STATE = {
       startOnCreation: false,
       initEnabled: false,
       optimizedFor: 'desktop',
+      topology: {
+        sockets: 1,
+        cores: 1,
+        threads: 1,
+      },
     },
     network: {
       nics: [],
@@ -43,20 +49,20 @@ const DEFAULT_STATE = {
   showCloseWizardDialog: false,
   stepNavigation: {
     basic: {
+      valid: false,
       preventEnter: false,
-      preventExit: true,
     },
     network: {
+      valid: true,
       preventEnter: false,
-      preventExit: false,
     },
     storage: {
+      valid: false,
       preventEnter: false,
-      preventExit: false,
     },
     review: {
+      valid: true,
       preventEnter: false,
-      preventExit: false,
     },
   },
 
@@ -68,22 +74,39 @@ const DEFAULT_STATE = {
  * Given the set of clusters and VM templates available to the user, build the initial
  * new VM state for the create wizard.
  */
-function getInitialState (clusters, templates, blankTemplateId, operatingSystems) {
+function getInitialState ({
+  clusters,
+  templates,
+  blankTemplateId,
+  operatingSystems,
+  storageDomains,
+  defaultGeneralTimezone,
+  defaultWindowsTimezone,
+  locale,
+}) {
   // 1 cluster available? select it by default
-  let clusterId
-  if (clusters.size === 1) {
-    clusterId = clusters.first().get('id')
+  let changes = {}
+  const clustersList = createClusterList({ clusters, locale })
+  if (clustersList.length === 1) {
+    changes.clusterId = clustersList[0].id
   }
 
   // 1 template available (Blank only) on the default cluster? set the source to 'iso'
-  let provisionSource = 'template'
-  let templateId
-  if (clusterId) {
-    const templateList = createTemplateList(templates, clusterId)
-    if (templateList.length === 1 && templateList[0].id === blankTemplateId) {
-      provisionSource = 'iso'
-    } else {
-      templateId = blankTemplateId
+  changes.provisionSource = 'template'
+  if (changes.clusterId) {
+    changes = {
+      ...changes,
+      ...handleClusterIdChange(changes.clusterId, {
+        blankTemplateId,
+        defaultValues: DEFAULT_STATE.steps.basic,
+        clusters,
+        templates,
+        operatingSystems,
+        storageDomains,
+        defaultGeneralTimezone,
+        defaultWindowsTimezone,
+        locale,
+      }),
     }
   }
   const blankTemplate = templates.get(blankTemplateId)
@@ -116,9 +139,7 @@ function getInitialState (clusters, templates, blankTemplateId, operatingSystems
     draft.steps.basic = {
       ...draft.steps.basic,
       ...blankTemplateValues,
-      clusterId,
-      provisionSource,
-      templateId,
+      ...changes,
     }
   })
 
@@ -153,25 +174,29 @@ class CreateVmWizard extends React.Component {
   constructor (props) {
     super(props)
 
-    this.state = getInitialState(props.clusters, props.templates, props.blankTemplateId, props.operatingSystems)
+    this.state = getInitialState(props)
     this.hideAndResetState = this.hideAndResetState.bind(this)
     this.hideAndNavigate = this.hideAndNavigate.bind(this)
     this.handleBasicOnUpdate = this.handleBasicOnUpdate.bind(this)
     this.handleBasicOnExit = this.handleBasicOnExit.bind(this)
     this.handleListOnUpdate = this.handleListOnUpdate.bind(this)
     this.handleCreateVm = this.handleCreateVm.bind(this)
+    this.wizardAllowGoToStepFromActiveStep = this.wizardAllowGoToStepFromActiveStep.bind(this)
+    this.wizardAllowClickBack = this.wizardAllowClickBack.bind(this)
+    this.wizardAllowClickNext = this.wizardAllowClickNext.bind(this)
     this.wizardGoToStep = this.wizardGoToStep.bind(this)
     this.wizardClickBack = this.wizardClickBack.bind(this)
     this.wizardClickNext = this.wizardClickNext.bind(this)
     this.hideCloseWizardDialog = this.hideCloseWizardDialog.bind(this)
     this.showCloseWizardDialog = this.showCloseWizardDialog.bind(this)
+    const { msg } = this.props
 
     this.wizardSteps = [
       {
         id: 'basic',
         title: msg.createVmWizardStepTitleBasic(),
 
-        render: () => (
+        render: (activeStepIndex, title) => (
           <BasicSettings
             id='create-vm-wizard-basic'
             data={this.state.steps.basic}
@@ -180,7 +205,7 @@ class CreateVmWizard extends React.Component {
             onUpdate={({ valid = false, partialUpdate = {} }) => {
               this.handleBasicOnUpdate(partialUpdate)
               this.setState(produce(draft => {
-                draft.stepNavigation.basic.preventExit = !valid
+                draft.stepNavigation.basic.valid = valid
               }))
             }}
           />
@@ -202,7 +227,7 @@ class CreateVmWizard extends React.Component {
             onUpdate={({ valid = true, ...updatePayload }) => {
               this.handleListOnUpdate('network', 'nics', updatePayload)
               this.setState(produce(draft => {
-                draft.stepNavigation.network.preventExit = !valid
+                draft.stepNavigation.network.valid = valid
               }))
             }}
           />
@@ -225,7 +250,7 @@ class CreateVmWizard extends React.Component {
             onUpdate={({ valid = true, ...updatePayload }) => {
               this.handleListOnUpdate('storage', 'disks', updatePayload)
               this.setState(produce(draft => {
-                draft.stepNavigation.storage.preventExit = !valid
+                draft.stepNavigation.storage.valid = valid
               }))
             }}
           />
@@ -252,7 +277,7 @@ class CreateVmWizard extends React.Component {
               .filter(
                 record => record.getIn([ 'failedAction', 'meta', 'correlationId' ]) === correlationId
               )
-              .map(record => record.get('message'))
+              .map(record => buildMessageFromRecord(record.toJS(), msg))
               .toJS()
 
           return <SummaryReview
@@ -288,9 +313,8 @@ class CreateVmWizard extends React.Component {
   }
 
   hideAndResetState () {
-    const { onHide, clusters, templates, blankTemplateId, operatingSystems } = this.props
-    this.setState(getInitialState(clusters, templates, blankTemplateId, operatingSystems))
-    onHide()
+    this.setState(getInitialState(this.props))
+    this.props.onHide()
   }
 
   hideAndNavigate () {
@@ -348,26 +372,55 @@ class CreateVmWizard extends React.Component {
         }
 
         if (resetDisks) {
+          const { storageDomains, locale, msg } = this.props
+          const { dataCenterId } = this.state.steps.basic
+          const dataCenterStorageDomainsList = createStorageDomainList({
+            storageDomains,
+            dataCenterId,
+            locale,
+            msg,
+          })
+
           draft.steps.storage = {
             updated: (draft.steps.storage.updated + 1),
             disks: !template
               ? []
               : template.get('disks', List())
-                .map(disk => ({
-                  id: disk.get('attachmentId'),
-                  name: disk.get('name'),
+                .map(disk => {
+                  const canUserUseStorageDomain =
+                    !!dataCenterStorageDomainsList.find(sd => sd.id === disk.get('storageDomainId'))
 
-                  diskId: disk.get('id'),
-                  storageDomainId: disk.get('storageDomainId'),
-                  canUserUseStorageDomain: this.props.storageDomains.getIn([ disk.get('storageDomainId'), 'canUserUseDomain' ], false),
+                  /*
+                   * To be consistent with webadmin create VM from a template, diskType needs
+                   * to match webadmin's default diskType. Webadmin derives the default disk
+                   * type for the template's default storage allocation value, which is derived
+                   * from the optimizedFor type.
+                   *
+                   * Optimized for -> Storage Allocation -> format / diskType:
+                   *   - desktop -> Thin -> cow / 'thin'
+                   *   - server or high performance -> Clone -> raw / as defined in the template
+                   */
+                  const diskType = // constrain to values from createDiskTypeList()
+                    template.get('type') === 'desktop' ? 'thin'
+                      : this.state.steps.basic.optimizedFor === 'desktop' ? 'thin'
+                        : disk.get('sparse') ? 'thin' : 'pre'
 
-                  bootable: disk.get('bootable'),
-                  iface: disk.get('iface'),
-                  type: disk.get('type'), // [ image | lun | cinder ]
-                  diskType: disk.get('sparse') ? 'thin' : 'pre', // constrain to values from createDiskTypeList()
-                  size: disk.get('provisionedSize'), // bytes
-                  isFromTemplate: true,
-                }))
+                  return {
+                    id: disk.get('attachmentId'),
+                    name: disk.get('name'),
+
+                    diskId: disk.get('id'),
+                    storageDomainId: disk.get('storageDomainId'),
+                    canUserUseStorageDomain,
+
+                    bootable: disk.get('bootable'),
+                    iface: disk.get('iface'),
+                    type: disk.get('type'), // [ image | lun | cinder ]
+                    diskType,
+                    size: disk.get('provisionedSize'), // bytes
+                    isFromTemplate: true,
+                  }
+                })
                 .toJS(),
           }
         }
@@ -413,13 +466,44 @@ class CreateVmWizard extends React.Component {
     this.props.onCreate(basic, nics, disks, correlationId)
   }
 
-  wizardGoToStep (newStepIndex) {
+  wizardAllowGoToStepFromActiveStep (newStepIndex) {
+    if (newStepIndex < 0 || newStepIndex >= this.wizardSteps.length) {
+      return false
+    }
+
     const { activeStepIndex, stepNavigation } = this.state
-    const activeStep = this.wizardSteps[activeStepIndex]
     const newStep = this.wizardSteps[newStepIndex]
 
+    // Direction >0 is forward, <0 is backward
+    //   Forward ok if ... can enter the new step and each step between active and new is valid
+    //   Backward ok if ... can enter the new step
+    const direction = newStepIndex - activeStepIndex
+    if (direction > 0) {
+      return !stepNavigation[newStep.id].preventEnter &&
+        this.wizardSteps.slice(activeStepIndex, newStepIndex).every(step => stepNavigation[step.id].valid)
+    } else if (direction < 0) {
+      return !stepNavigation[newStep.id].preventEnter
+    }
+
+    return false
+  }
+
+  wizardAllowClickBack () {
+    return this.wizardAllowGoToStepFromActiveStep(Math.max(this.state.activeStepIndex - 1, 0))
+  }
+
+  wizardAllowClickNext () {
+    return this.wizardAllowGoToStepFromActiveStep(Math.min(this.state.activeStepIndex + 1, this.wizardSteps.length - 1))
+  }
+
+  wizardGoToStep (newStepIndex) {
+    const { activeStepIndex } = this.state
+    const activeStep = this.wizardSteps[activeStepIndex]
+
     // make sure we can leave the current step and enter the new step
-    if (stepNavigation[activeStep.id].preventExit || stepNavigation[newStep.id].preventEnter) return
+    if (!this.wizardAllowGoToStepFromActiveStep(newStepIndex)) {
+      return
+    }
 
     // run and the current step's `onExit()`
     if (activeStep.onExit) {
@@ -438,8 +522,8 @@ class CreateVmWizard extends React.Component {
   }
 
   render () {
-    const { activeStepIndex, stepNavigation, correlationId } = this.state
-    const activeStep = this.wizardSteps[activeStepIndex]
+    const { msg } = this.props
+    const { activeStepIndex, correlationId, showCloseWizardDialog } = this.state
     const vmCreateWorking = correlationId !== null && !this.props.actionResults.has(correlationId)
     const vmCreateStarted = correlationId !== null && !!this.props.actionResults.get(correlationId)
 
@@ -447,7 +531,9 @@ class CreateVmWizard extends React.Component {
     const isPrimaryNext = !isReviewStep
     const isPrimaryCreate = isReviewStep && !vmCreateStarted
     const isPrimaryClose = isReviewStep && vmCreateStarted
-    const { showCloseWizardDialog } = this.state
+
+    const enableGoBack = activeStepIndex > 0 && !isPrimaryClose && this.wizardAllowClickBack()
+    const enableGoForward = (isReviewStep && !vmCreateWorking) || this.wizardAllowClickNext()
 
     return <React.Fragment>
       {!showCloseWizardDialog && <Wizard
@@ -470,7 +556,7 @@ class CreateVmWizard extends React.Component {
           <Button
             bsStyle='default'
             onClick={this.wizardClickBack}
-            disabled={activeStepIndex === 0 || isPrimaryClose || stepNavigation[activeStep.id].preventExit}
+            disabled={!enableGoBack}
           >
             <Icon type='fa' name='angle-left' />
             { msg.createVmWizardButtonBack() }
@@ -487,7 +573,7 @@ class CreateVmWizard extends React.Component {
                 : isPrimaryCreate ? this.handleCreateVm
                   : this.hideAndNavigate
             }
-            disabled={stepNavigation[activeStep.id].preventExit || vmCreateWorking}
+            disabled={!enableGoForward}
           >
             { isPrimaryNext && msg.createVmWizardButtonNext() }
             { isPrimaryCreate && msg.createVmWizardButtonCreate() }
@@ -508,20 +594,32 @@ class CreateVmWizard extends React.Component {
     </React.Fragment>
   }
 }
+
 CreateVmWizard.propTypes = {
   show: PropTypes.bool,
   onHide: PropTypes.func,
 
+  // todo remove the "eslint-disable-next-line"s below when updating the eslint to newer version
+  // eslint-disable-next-line react/no-unused-prop-types
   clusters: PropTypes.object.isRequired,
   storageDomains: PropTypes.object.isRequired,
   templates: PropTypes.object.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
   blankTemplateId: PropTypes.string.isRequired,
   userMessages: PropTypes.object.isRequired,
   actionResults: PropTypes.object.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
   operatingSystems: PropTypes.object.isRequired,
 
   onCreate: PropTypes.func,
   navigateToVm: PropTypes.func,
+  // eslint-disable-next-line react/no-unused-prop-types
+  defaultGeneralTimezone: PropTypes.string.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
+  defaultWindowsTimezone: PropTypes.string.isRequired,
+  msg: PropTypes.object.isRequired,
+  // eslint-disable-next-line react/no-unused-prop-types
+  locale: PropTypes.string.isRequired,
 }
 
 export default connect(
@@ -533,6 +631,8 @@ export default connect(
     userMessages: state.userMessages,
     actionResults: state.vms.get('correlationResult'),
     operatingSystems: state.operatingSystems,
+    defaultGeneralTimezone: state.config.get('defaultGeneralTimezone'),
+    defaultWindowsTimezone: state.config.get('defaultWindowsTimezone'),
   }),
   (dispatch) => ({
     onCreate: (basic, nics, disks, correlationId) => dispatch(
@@ -540,4 +640,4 @@ export default connect(
     ),
     navigateToVm: (vmId) => dispatch(Actions.navigateToVmDetails(vmId)),
   })
-)(CreateVmWizard)
+)(withMsg(CreateVmWizard))

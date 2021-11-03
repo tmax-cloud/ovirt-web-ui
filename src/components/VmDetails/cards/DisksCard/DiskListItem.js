@@ -1,8 +1,8 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import PropTypes from 'prop-types'
 import { connect } from 'react-redux'
 
-import { msg } from '../../../../intl'
+import { MsgContext } from '../../../../intl'
 import { convertValue, round } from '../../../../utils'
 import { PendingTaskTypes } from '../../../../reducers/pendingTasks'
 
@@ -14,7 +14,7 @@ import { Icon, Label } from 'patternfly-react'
 import DeleteConfirmationModal from '../../../VmModals/DeleteConfirmationModal'
 import DiskStateIcon from './DiskStateIcon'
 import DiskImageEditor from './DiskImageEditor'
-import OverlayTooltip from '_/components/OverlayTooltip'
+import { Tooltip } from '_/components/tooltips'
 
 function isDiskBeingDeleted (diskId, pendingTasks) {
   return !!pendingTasks.find(
@@ -34,6 +34,7 @@ const DiskListItem = ({
   isEditing, isDiskBeingDeleted, canDeleteDisks,
   onEdit, onDelete,
 }) => {
+  const { msg } = useContext(MsgContext)
   const size = disk.get('type') === 'lun' ? disk.get('lunSize') : disk.get('provisionedSize')
   const { unit, value } = convertValue('B', size)
   const isLocked = disk.get('status') === 'locked'
@@ -61,11 +62,11 @@ const DiskListItem = ({
     {/* Details Column - take the rest of the space */}
     <div className={itemStyle['item-row-info']}>
       { isDiskBeingDeleted &&
-        <OverlayTooltip id={`${idPrefix}-name-info-deleting-tooltip`} tooltip={msg.diskEditorDiskDeletingTooltip()} placement='top'>
+        <Tooltip id={`${idPrefix}-name-info-deleting-tooltip`} tooltip={msg.diskEditorDiskDeletingTooltip()}>
           <span id={`${idPrefix}-name`} className={`${style['name-info']} ${style['name-info-deleting']}`}>
             {view.name}
           </span>
-        </OverlayTooltip>
+        </Tooltip>
       }
       { !isDiskBeingDeleted &&
         <span id={`${idPrefix}-name`} className={style['name-info']}>
@@ -93,23 +94,23 @@ const DiskListItem = ({
           storageDomainList={storageDomainList}
           onSave={onEdit}
           trigger={({ onClick }) => (
-            <OverlayTooltip id={`${idPrefix}-action-edit-tooltip`} tooltip={msg.diskEditTooltip()}>
+            <Tooltip id={`${idPrefix}-action-edit-tooltip`} tooltip={msg.diskEditTooltip()}>
               <a id={`${idPrefix}-action-edit`} className={itemStyle['item-action']} onClick={onClick} >
                 <Icon type='pf' name='edit' />
               </a>
-            </OverlayTooltip>
+            </Tooltip>
           )}
         />
       }
       { !canEdit &&
-        <OverlayTooltip id={`${idPrefix}-action-edit-tooltip-disabled`} tooltip={msg.diskEditDisabledTooltip()}>
+        <Tooltip id={`${idPrefix}-action-edit-tooltip-disabled`} tooltip={msg.diskEditDisabledTooltip()}>
           <Icon
             type='pf'
             name='edit'
             id={`${idPrefix}-action-edit-disabled`}
             className={`${itemStyle['item-action']} ${itemStyle['item-action-disabled']}`}
           />
-        </OverlayTooltip>
+        </Tooltip>
       }
 
       { canDelete &&
@@ -118,11 +119,11 @@ const DiskListItem = ({
           severity='danger'
           onDelete={() => { onDelete(vm.get('id'), view.id) }}
           trigger={({ onClick }) => (
-            <OverlayTooltip id={`${idPrefix}-action-delete-tooltip`} tooltip={msg.diskDeleteTooltip()}>
+            <Tooltip id={`${idPrefix}-action-delete-tooltip`} tooltip={msg.diskDeleteTooltip()}>
               <a id={`${idPrefix}-action-delete`} className={itemStyle['item-action']} onClick={onClick}>
                 <Icon type='pf' name='delete' />
               </a>
-            </OverlayTooltip>
+            </Tooltip>
           )}
         >
           <span
@@ -136,14 +137,14 @@ const DiskListItem = ({
         </DeleteConfirmationModal>
       }
       { !canDelete &&
-        <OverlayTooltip id={`${idPrefix}-action-delete-tooltip-disabled`} tooltip={msg.diskDeleteDisabledTooltip()}>
+        <Tooltip id={`${idPrefix}-action-delete-tooltip-disabled`} tooltip={msg.diskDeleteDisabledTooltip()}>
           <Icon
             type='pf'
             name='delete'
             id={`${idPrefix}-action-delete-disabled`}
             className={`${itemStyle['item-action']} ${itemStyle['item-action-disabled']}`}
           />
-        </OverlayTooltip>
+        </Tooltip>
       }
     </div>
     }

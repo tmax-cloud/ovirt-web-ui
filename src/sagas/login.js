@@ -2,7 +2,7 @@ import { all, call, put, takeEvery, select } from 'redux-saga/effects'
 import pick from 'lodash/pick'
 
 import Product from '_/version'
-import Api from '_/ovirtapi'
+import Api, { Transforms } from '_/ovirtapi'
 import AppConfiguration from '_/config'
 import OptionsManager from '_/optionsManager'
 
@@ -17,7 +17,6 @@ import {
   setUserFilterPermission,
   setAdministrator,
   getAllEvents,
-  getOption,
 
   getAllClusters,
   getAllHosts,
@@ -27,6 +26,7 @@ import {
   getAllVnicProfiles,
   getRoles,
   getUserGroups,
+  getUser,
 
   downloadConsole,
   getSingleVm,
@@ -52,12 +52,16 @@ import {
 } from './base-data'
 import { downloadVmConsole } from './console'
 import { fetchRoles } from './roles'
-import { fetchServerConfiguredValues } from './server-configs'
+import { fetchServerConfiguredValues, fetchGeneralEngineOption } from './server-configs'
 import { fetchDataCentersAndStorageDomains, fetchIsoFiles } from './storageDomains'
 import { loadIconsFromLocalStorage } from './osIcons'
-import { transformAndPermitVm } from './index'
+import {
+  transformAndPermitVm,
+  fetchCurrentUser,
+} from './index'
 
-import { loadFromLocalStorage } from '_/storage'
+import { loadFromLocalStorage, removeFromLocalStorage } from '_/storage'
+import { loadUserOptions } from './options'
 
 /**
  * Perform login checks, and if they pass, perform initial data loading
@@ -84,7 +88,7 @@ function* login (action) {
     console.error('oVirt API version check failed')
     yield put(failedExternalAction({
       message: composeIncompatibleOVirtApiVersionMessage(oVirtMeta),
-      shortMessage: 'oVirt API version check failed', // TODO: Localize
+      messageDescriptor: { id: 'apiVersionCheckFailed' },
     }))
     return
   }
@@ -134,17 +138,13 @@ function* logout () {
  * is compatible with our expected API version.
  */
 function* checkOvirtApiVersion (oVirtMeta) {
-  if (!(oVirtMeta &&
-        oVirtMeta['product_info'] &&
-        oVirtMeta['product_info']['version'] &&
-        oVirtMeta['product_info']['version']['major'] &&
-        oVirtMeta['product_info']['version']['minor'])) {
+  if (!isValidOvirtMeta(oVirtMeta)) {
     console.error('Incompatible oVirt API version: ', oVirtMeta)
     yield put(setOvirtApiVersion({ passed: false, ...oVirtMeta }))
     return false
   }
 
-  const actual = oVirtMeta['product_info']['version']
+  const actual = Transforms.Version.toInternal(oVirtMeta['product_info']['version'])
   const required = Product.ovirtApiVersionRequired
   const passed = compareVersion(actual, required)
 
@@ -152,14 +152,19 @@ function* checkOvirtApiVersion (oVirtMeta) {
   return passed
 }
 
-function composeIncompatibleOVirtApiVersionMessage (oVirtMeta) {
-  const requested = `${Product.ovirtApiVersionRequired.major}.${Product.ovirtApiVersionRequired.minor}`
-  let found
-  if (!(oVirtMeta &&
+function isValidOvirtMeta (oVirtMeta) {
+  return oVirtMeta &&
         oVirtMeta['product_info'] &&
         oVirtMeta['product_info']['version'] &&
         oVirtMeta['product_info']['version']['major'] &&
-        oVirtMeta['product_info']['version']['minor'])) {
+        oVirtMeta['product_info']['version']['minor'] &&
+        oVirtMeta['product_info']['version']['build']
+}
+
+function composeIncompatibleOVirtApiVersionMessage (oVirtMeta) {
+  const requested = `${Product.ovirtApiVersionRequired.major}.${Product.ovirtApiVersionRequired.minor}`
+  let found
+  if (!isValidOvirtMeta(oVirtMeta)) {
     found = JSON.stringify(oVirtMeta)
   } else {
     const version = oVirtMeta['product_info']['version']
@@ -179,11 +184,7 @@ function* checkUserFilterPermissions () {
     return
   }
 
-  const alwaysFilterOption = yield callExternalAction(
-    'getOption',
-    Api.getOption,
-    getOption('AlwaysFilterResultsForWebUi', 'general', 'false'))
-
+  const alwaysFilterOption = yield fetchGeneralEngineOption('AlwaysFilterResultsForWebUi', 'false')
   const isAlwaysFilterOption = alwaysFilterOption === 'true'
   yield put.resolve(setUserFilterPermission(isAlwaysFilterOption))
 }
@@ -200,10 +201,12 @@ function* initialLoad () {
   yield all([
     call(loadIconsFromLocalStorage),
     call(fetchRoles, getRoles()),
+    call(fetchCurrentUser, getUser()),
     call(fetchUserGroups, getUserGroups()),
     call(fetchAllOS, getAllOperatingSystems()),
     call(fetchAllHosts, getAllHosts()),
     call(loadFilters),
+    call(loadUserOptions),
   ])
   console.log('\u2714 data loads with no prerequisites are complete')
   console.groupEnd('no data prerequisites')
@@ -224,6 +227,9 @@ function* initialLoad () {
   yield call(fetchIsoFiles)
   console.log('\u2714 data loads that require storage domains are complete')
   console.groupEnd('needs storage domains')
+
+  // delete options left in local storage by older versions
+  removeFromLocalStorage('options')
 
   // Vms and Pools are loaded as needed / accessed
 }

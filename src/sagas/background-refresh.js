@@ -1,4 +1,9 @@
 import {
+  resumeNotifications,
+  loadUserOptions,
+} from './options'
+
+import {
   all,
   call,
   put,
@@ -34,28 +39,29 @@ import { fetchIsoFiles } from './storageDomains'
  * This should be done at the time of navigation to the page, typically by the page router.
  */
 function* changePage (action) {
-  yield put(Actions.stopSchedulerFixedDelay())
   yield put(Actions.setCurrentPage(action.payload))
-  yield put(Actions.refresh({
-    onNavigation: true,
-    shallowFetch: true,
-  }))
-  yield put(Actions.startSchedulerFixedDelay())
+  const delayInSeconds = yield select(state => state.options.getIn(['remoteOptions', 'refreshInterval', 'content'], AppConfiguration.schedulerFixedDelayInSeconds))
+  yield put(Actions.startSchedulerFixedDelay({ pageRouterRefresh: true, targetPage: action.payload, startDelayInSeconds: 0, delayInSeconds }))
+}
+
+function* refreshManually () {
+  const currentPage = yield select(state => state.config.get('currentPage'))
+  const delayInSeconds = yield select(state => state.options.getIn(['remoteOptions', 'refreshInterval', 'content'], AppConfiguration.schedulerFixedDelayInSeconds))
+  yield put(Actions.startSchedulerFixedDelay({ manualRefresh: true, targetPage: currentPage, startDelayInSeconds: 0, delayInSeconds }))
 }
 
 /**
  * Invoke the correct refresh function based on the app's current page type.
  */
-function* refreshData (action) {
-  const currentPage = yield select(state => state.config.get('currentPage'))
+function* refreshData ({ payload: { targetPage, ...otherPayload } }) {
   const refreshType =
-    currentPage.type === C.NO_REFRESH_TYPE ? null
-      : currentPage.type === undefined ? C.LIST_PAGE_TYPE
-        : currentPage.type
+    targetPage.type === C.NO_REFRESH_TYPE ? null
+      : targetPage.type === undefined ? C.LIST_PAGE_TYPE
+        : targetPage.type
 
-  console.info('refreshData() 🡒', 'refreshType:', refreshType, 'currentPage:', currentPage, 'payload:', action.payload)
+  console.info('refreshData() 🡒', 'refreshType:', refreshType, 'currentPage:', targetPage, 'payload:', otherPayload)
   if (refreshType) {
-    yield pagesRefreshers[refreshType](Object.assign({ id: currentPage.id }, action.payload))
+    yield pagesRefreshers[refreshType](Object.assign({ id: targetPage.id }, otherPayload))
   }
   console.info('refreshData() 🡒 finished')
 }
@@ -65,6 +71,7 @@ const pagesRefreshers = {
   [C.DETAIL_PAGE_TYPE]: refreshDetailPage,
   [C.CREATE_PAGE_TYPE]: refreshCreatePage,
   [C.CONSOLE_PAGE_TYPE]: refreshConsolePage,
+  [C.SETTINGS_PAGE_TYPE]: loadUserOptions,
 }
 
 function* getIdsByType (type) {
@@ -72,7 +79,7 @@ function* getIdsByType (type) {
   return ids
 }
 
-function* refreshListPage ({ shallowFetch, onNavigation, onSchedule }) {
+function* refreshListPage () {
   const [ vmsPage, poolsPage ] = yield select(st => [ st.vms.get('vmsPage'), st.vms.get('poolsPage') ])
 
   // Special case for the very first `refreshListPage` of the App .. use fetchByPage()!
@@ -87,7 +94,6 @@ function* refreshListPage ({ shallowFetch, onNavigation, onSchedule }) {
       if (vmsPage > 0) {
         const fetchedVmIds = yield fetchVms(Actions.getVmsByCount({
           count: vmsPage * AppConfiguration.pageLimit,
-          shallowFetch,
         }))
 
         const vmsIds = yield getIdsByType('vms')
@@ -95,7 +101,7 @@ function* refreshListPage ({ shallowFetch, onNavigation, onSchedule }) {
           (yield all(
             vmsIds
               .filter(vmId => !fetchedVmIds.includes(vmId))
-              .map(vmId => call(fetchSingleVm, Actions.getSingleVm({ vmId, shallowFetch })))
+              .map(vmId => call(fetchSingleVm, Actions.getSingleVm({ vmId, shallowFetch: true })))
           ))
             .reduce((vmIds, vm) => { if (vm) vmIds.push(vm.id); return vmIds }, [])
 
@@ -143,62 +149,109 @@ function* refreshListPage ({ shallowFetch, onNavigation, onSchedule }) {
   yield put(Actions.updateVmsPoolsCount())
 }
 
-function* refreshDetailPage ({ id, onNavigation, onSchedule }) {
+function* refreshDetailPage ({ id, manualRefresh }) {
   yield selectVmDetail(Actions.selectVmDetail({ vmId: id }))
   yield getConsoleOptions(Actions.getConsoleOptions({ vmId: id }))
 
   // Load ISO images on manual refresh click only
-  if (!onNavigation && !onSchedule) {
+  if (manualRefresh) {
     yield fetchIsoFiles(Actions.getIsoFiles())
   }
 }
 
-function* refreshCreatePage ({ id, onNavigation, onSchedule }) {
+function* refreshCreatePage ({ id, manualRefresh }) {
   if (id) {
     yield selectVmDetail(Actions.selectVmDetail({ vmId: id }))
   }
 
   // Load ISO images on manual refresh click only
-  if (!onNavigation && !onSchedule) {
+  if (manualRefresh) {
     yield fetchIsoFiles(Actions.getIsoFiles())
   }
 }
 
-function* refreshConsolePage ({ id, onNavigation, onSchedule }) {
+function* refreshConsolePage ({ id }) {
   if (id) {
     yield selectVmDetail(Actions.selectVmDetail({ vmId: id }))
   }
 }
 
-function* startSchedulerWithFixedDelay (action) {
+function* startSchedulerWithFixedDelay ({ payload: { delayInSeconds, startDelayInSeconds, ...rest } }) {
   // if a scheduler is already running, stop it
   yield put(Actions.stopSchedulerFixedDelay())
 
+  const lastRefresh = yield select(state => state.config.get('lastRefresh', 0))
+
   // run a new scheduler
-  yield schedulerWithFixedDelay(action.payload.delayInSeconds)
+  yield schedulerWithFixedDelay({
+    delayInSeconds,
+    startDelayInSeconds: calculateStartDelayIfMissing({ delayInSeconds, startDelayInSeconds, lastRefresh }),
+    ...rest,
+  })
+}
+
+/* Continue previous wait period (unless immediate refresh is forced).
+  Restarting the wait period could lead to irregular, long intervals without refresh
+  or prevent the refresh (as long as user will keep changing the interval)
+  Example:
+  1. previous refresh period is 2 min (1m 30sec already elapsed)
+  2. user changes it to 5min
+  3. already elapsed time will be taken into consideration and refresh will be
+     triggered after 3 m 30sec.
+  Result: Wait intervals will be 2min -> 2min -> 5min -> 5min.
+  With restarting timers: 2min -> 2min -> 6min 30 sec -> 5min.
+*/
+function calculateStartDelayIfMissing ({ delayInSeconds, startDelayInSeconds, lastRefresh }) {
+  if (startDelayInSeconds !== undefined) {
+    return startDelayInSeconds
+  }
+  const timeFromLastRefresh = ((Date.now() - lastRefresh) / 1000).toFixed(0)
+  return timeFromLastRefresh > delayInSeconds ? 0 : delayInSeconds - timeFromLastRefresh
+}
+
+/**
+ * Starts a cancellable timer.
+ * Timer can be cancelled by dispatching configurable action.
+ */
+function* schedulerWaitFor (timeInSeconds, cancelActionType = C.STOP_SCHEDULER_FIXED_DELAY) {
+  if (!timeInSeconds) {
+    return {}
+  }
+  const { stopped } = yield race({
+    stopped: take(cancelActionType),
+    fixedDelay: delay(timeInSeconds * 1000),
+  })
+  return { stopped: !!stopped }
 }
 
 let _SchedulerCount = 0
 
-function* schedulerWithFixedDelay (delayInSeconds = AppConfiguration.schedulerFixedDelayInSeconds) {
-  if (!isNumber(delayInSeconds) || delayInSeconds <= 0) {
+function* schedulerWithFixedDelay ({
+  delayInSeconds = AppConfiguration.schedulerFixedDelayInSeconds,
+  startDelayInSeconds = AppConfiguration.schedulerFixedDelayInSeconds,
+  targetPage,
+  pageRouterRefresh = false,
+  manualRefresh = false,
+}) {
+  if (!isNumber(delayInSeconds) || delayInSeconds <= 0 ||
+  !isNumber(startDelayInSeconds) || startDelayInSeconds < 0) {
+    console.error(`⏰ schedulerWithFixedDelay 🡒 invalid arguments: delayInSeconds=${delayInSeconds} startDelayInSeconds=${startDelayInSeconds}`)
     return
   }
+  let firstRun = true
+  const myId = ++_SchedulerCount
+  console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 starting fixed delay scheduler with start delay ${startDelayInSeconds}`)
 
-  const myId = _SchedulerCount++
-  console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 starting fixed delay scheduler`)
+  const { stopped: stoppedBeforeStarted } = yield call(schedulerWaitFor, startDelayInSeconds)
+  if (stoppedBeforeStarted) {
+    console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 scheduler has been stopped during start delay`)
+  }
 
-  let enabled = true
+  let enabled = !stoppedBeforeStarted
   while (enabled) {
-    console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 stoppable delay for: ${delayInSeconds}`)
-    const { stopped } = yield race({
-      stopped: take(C.STOP_SCHEDULER_FIXED_DELAY), // TODO: stop the scheduler if an error page or logged out page is displayed
-      fixedDelay: call(delay, (delayInSeconds * 1000)),
-    })
-
-    if (stopped) {
+    if (myId !== _SchedulerCount) {
       enabled = false
-      console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 scheduler has been stopped`)
+      console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 scheduler has been stopped due to newer scheduler detected [${_SchedulerCount}]`)
       continue
     }
 
@@ -215,11 +268,38 @@ function* schedulerWithFixedDelay (delayInSeconds = AppConfiguration.schedulerFi
       continue
     }
 
-    console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 running after delay of: ${delayInSeconds}`)
     yield put(Actions.refresh({
-      onSchedule: true,
-      shallowFetch: true,
+      pageRouterRefresh: pageRouterRefresh && firstRun,
+      manualRefresh: manualRefresh && firstRun,
+      targetPage,
+      schedulerRefresh: true,
     }))
+    firstRun = false
+
+    console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 stoppable delay for: ${delayInSeconds}`)
+    const { stopped } = yield call(schedulerWaitFor, delayInSeconds)
+
+    if (stopped) {
+      enabled = false
+      console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 scheduler has been stopped`)
+      continue
+    }
+
+    console.log(`⏰ schedulerWithFixedDelay[${myId}] 🡒 running after delay of: ${delayInSeconds}`)
+  }
+}
+
+let _SchedulerForNotificationsCount = 0
+function* scheduleResumingNotifications ({ payload: { delayInSeconds } }) {
+  yield put(Actions.stopSchedulerForResumingNotifications())
+  const myId = _SchedulerForNotificationsCount++
+  console.log(`notification timer [${myId}] - delay [${delayInSeconds}] sec`)
+  const { stopped } = yield call(schedulerWaitFor, delayInSeconds, C.STOP_SCHEDULER_FOR_RESUMING_NOTIFICATIONS)
+  if (stopped) {
+    console.log(`notification timer [${myId}] - stopped`)
+  } else {
+    console.log(`notification timer [${myId}] - resume notifications`)
+    yield call(resumeNotifications)
   }
 }
 
@@ -236,7 +316,9 @@ function* logoutAndCancelScheduler () {
 
 export default [
   takeEvery(C.START_SCHEDULER_FIXED_DELAY, startSchedulerWithFixedDelay),
+  throttle(5000, C.MANUAL_REFRESH, refreshManually),
   throttle(5000, C.REFRESH_DATA, refreshData),
   takeLatest(C.CHANGE_PAGE, changePage),
   takeEvery(C.LOGOUT, logoutAndCancelScheduler),
+  takeEvery(C.START_SCHEDULER_FOR_RESUMING_NOTIFICATIONS, scheduleResumingNotifications),
 ]

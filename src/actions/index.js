@@ -1,25 +1,32 @@
-import AppConfiguration from '../config'
+import AppConfiguration from '_/config'
 import {
   APP_CONFIGURED,
   CHANGE_PAGE,
   CHECK_TOKEN_EXPIRED,
   GET_BY_PAGE,
   GET_OPTION,
+  GET_USER,
   GET_USER_GROUPS,
+  MANUAL_REFRESH,
   SET_ADMINISTRATOR,
   SET_CPU_TOPOLOGY_OPTIONS,
   SET_CURRENT_PAGE,
   SET_DEFAULT_TIMEZONE,
   SET_USB_AUTOSHARE,
   SET_USB_FILTER,
+  SET_USER,
   SET_USER_FILTER_PERMISSION,
   SET_USER_GROUPS,
   SET_USER_SESSION_TIMEOUT_INTERVAL,
   SET_WEBSOCKET,
   SHOW_TOKEN_EXPIRED_MSG,
   START_SCHEDULER_FIXED_DELAY,
+  START_SCHEDULER_FOR_RESUMING_NOTIFICATIONS,
   STOP_SCHEDULER_FIXED_DELAY,
+  STOP_SCHEDULER_FOR_RESUMING_NOTIFICATIONS,
   UPDATE_PAGING_DATA,
+  SET_GLOBAL_DEFAULT_CONSOLE,
+  SET_GLOBAL_DEFAULT_VNC_MODE,
 } from '_/constants'
 
 export * from './error'
@@ -45,15 +52,38 @@ export function appConfigured () {
   return { type: APP_CONFIGURED }
 }
 
-export function startSchedulerFixedDelay (delayInSeconds = AppConfiguration.schedulerFixedDelayInSeconds) {
+export function manualRefresh () {
+  return { type: MANUAL_REFRESH }
+}
+
+export function startSchedulerFixedDelay ({
+  delayInSeconds = AppConfiguration.schedulerFixedDelayInSeconds,
+  startDelayInSeconds,
+  targetPage,
+  pageRouterRefresh = false,
+  manualRefresh = false,
+}) {
   return {
     type: START_SCHEDULER_FIXED_DELAY,
-    payload: { delayInSeconds },
+    payload: { delayInSeconds, startDelayInSeconds, targetPage, pageRouterRefresh, manualRefresh },
   }
 }
 
 export function stopSchedulerFixedDelay () {
   return { type: STOP_SCHEDULER_FIXED_DELAY }
+}
+
+export function startSchedulerForResumingNotifications (delayInSeconds) {
+  return {
+    type: START_SCHEDULER_FOR_RESUMING_NOTIFICATIONS,
+    payload: {
+      delayInSeconds,
+    },
+  }
+}
+
+export function stopSchedulerForResumingNotifications () {
+  return { type: STOP_SCHEDULER_FOR_RESUMING_NOTIFICATIONS }
 }
 
 export function setUserFilterPermission (filter) {
@@ -79,6 +109,23 @@ export function setWebsocket (websocket) {
     type: SET_WEBSOCKET,
     payload: {
       websocket,
+    },
+  }
+}
+
+export function setDefaultConsole (defaultConsole) {
+  return {
+    type: SET_GLOBAL_DEFAULT_CONSOLE,
+    payload: {
+      defaultConsole,
+    },
+  }
+}
+export function setDefaultVncMode (defaultVncMode) {
+  return {
+    type: SET_GLOBAL_DEFAULT_VNC_MODE,
+    payload: {
+      defaultVncMode,
     },
   }
 }
@@ -154,18 +201,11 @@ export function setSpiceUsbAutoShare (usbAutoshare) {
   }
 }
 
-/**
- * @param {string} optionName
- * @param {OptionVersionType} version option version
- * @param {string=} defaultValue
- */
-export function getOption (optionName, version, defaultValue) {
+export function getEngineOption (optionName) {
   return {
     type: GET_OPTION,
     payload: {
       optionName,
-      version,
-      defaultValue,
     },
   }
 }
@@ -183,19 +223,32 @@ export function getUserGroups () {
   return { type: GET_USER_GROUPS }
 }
 
+export function setUser ({ user }) {
+  return {
+    type: SET_USER,
+    payload: {
+      user,
+    },
+  }
+}
+
+export function getUser () {
+  return { type: GET_USER }
+}
+
 export function setCpuTopologyOptions ({
-  maxNumberOfSockets,
-  maxNumberOfCores,
-  maxNumberOfThreads,
-  maxNumOfVmCpus,
+  maxNumOfSockets,
+  maxNumOfCores,
+  maxNumOfThreads,
+  maxNumOfVmCpusPerArch,
 }) {
   return {
     type: SET_CPU_TOPOLOGY_OPTIONS,
     payload: {
-      maxNumberOfSockets,
-      maxNumberOfCores,
-      maxNumberOfThreads,
-      maxNumOfVmCpus,
+      maxNumOfSockets,
+      maxNumOfCores,
+      maxNumOfThreads,
+      maxNumOfVmCpusPerArch,
     },
   }
 }

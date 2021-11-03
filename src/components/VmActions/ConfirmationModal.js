@@ -1,7 +1,7 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import PropsTypes from 'prop-types'
 import { Modal, Icon } from 'patternfly-react'
-import { msg } from '_/intl'
+import { MsgContext } from '_/intl'
 
 const btnPropType = PropsTypes.shape({
   title: PropsTypes.string,
@@ -9,6 +9,7 @@ const btnPropType = PropsTypes.shape({
 })
 
 const ConfirmationModal = ({ show, title, confirm, body, subContent, onClose, extra, accessibleDescription }) => {
+  const { msg } = useContext(MsgContext)
   return (
     <Modal onHide={onClose} show={show} className='message-dialog-pf' aria-describedby={accessibleDescription}>
       <Modal.Header>
@@ -30,7 +31,9 @@ const ConfirmationModal = ({ show, title, confirm, body, subContent, onClose, ex
                   { body }
                 </p>
                 {
-                  subContent && <p>{ subContent }</p>
+                  subContent && typeof subContent === 'string'
+                    ? <p>{ subContent }</p>
+                    : subContent
                 }
               </div>
             </React.Fragment>
@@ -59,7 +62,7 @@ ConfirmationModal.propTypes = {
   }),
   extra: btnPropType,
   body: PropsTypes.oneOfType([PropsTypes.node, PropsTypes.string]).isRequired,
-  subContent: PropsTypes.string,
+  subContent: PropsTypes.oneOfType([PropsTypes.node, PropsTypes.string]),
 }
 
 export default ConfirmationModal

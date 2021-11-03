@@ -2,9 +2,10 @@
 //
 // Types used in the API and the types used internal to the App.
 //
-
 export type ApiVmType = Object
 export type VmType = Object
+
+export type ApiBooleanType = "true" | "false"
 
 export type ApiStatisticKindType = "counter" | "gauge"
 export type ApiStatisticTypeType = "decimal" | "integer" | "string"
@@ -17,15 +18,13 @@ export type ApiVmStatisticType = {
   type: ApiStatisticTypeType,
   unit: ApiStatisticUnitType,
   values: {
-    value: Array<{
-      datum: number,
-      detail?: string
-    }>
+    value: Array<{ datum: number} | { detail: string }>
   }
 }
 
 export type StatisticValueType = {
-  datum: number | Array<number>,
+  firstDatum: number | string | Object | void,
+  datum: Array<number | string | Object>,
   unit: ApiStatisticUnitType,
   description: string
 }
@@ -50,7 +49,7 @@ export type ApiSnapshotType = {
   snapshot_type?: string,
   date?: number,
   snapshot_status?: string,
-  persist_memorystate?: string
+  persist_memorystate?: ApiBooleanType
 }
 export type SnapshotType = {
   id: string,
@@ -63,9 +62,26 @@ export type SnapshotType = {
   isActive: boolean
 }
 
-export type ApiDiskAttachmentType = Object
-export type ApiDiskType = Object
 export type DiskInterfaceType = "ide" | "sata" | "virtio" | "virtio_scsi"
+
+// http://ovirt.github.io/ovirt-engine-api-model/4.4/#types/disk_attachment
+export type ApiDiskAttachmentType = {
+  active: ApiBooleanType,
+  bootable: ApiBooleanType,
+  disk?: Object,
+  href?: string,
+  comment?: string,
+  description?: string,
+  id?: string,
+  logical_name?: string,
+  pass_discard?: ApiBooleanType,
+  read_only?: ApiBooleanType,
+  uses_scsi_reservation?: ApiBooleanType,
+  template?: Object,
+  vm?: Object,
+  interface?: DiskInterfaceType
+}
+export type ApiDiskType = Object
 export type DiskTypeType = "image" | "cinder" | "lun"
 export type DiskType = {
   // attachment part
@@ -114,14 +130,56 @@ export type StorageDomainFileType = Object
 export type ApiClusterType = Object
 export type ClusterType = Object
 
-export type ApiNicType = Object
+type NicInterfaceType = 'e1000' | 'pci_passthrough' | 'rtl8139' | 'rtl8139_virtio' | 'virtio'
+
+type IpType = {
+  address: string,
+  version: 'v4' | 'v6'
+}
+
+export type ApiNicType = {
+  reported_devices?: {
+    reported_device: Array<{
+      mac: {
+        address: string
+      },
+      ips: {
+        ip: Array<IpType>
+      }
+    }>
+  },
+  id: string,
+  name: string,
+  mac?: Object,
+  plugged: ApiBooleanType,
+  linked: ApiBooleanType,
+  interface: NicInterfaceType,
+  vnic_profile?: {
+    id: string | null | typeof undefined
+  }
+}
+
+export type ReportedDevicesType = {
+  description: string,
+  href: string,
+  id: string,
+  ips?: { ip: Array<IpType> },
+  mac: { address: string },
+  name: string,
+  type: string,
+  vm: {
+    href: string,
+    id: string
+  }
+}
+
 export type NicType = {
   id: string,
   name: string,
-  mac: string,
+  mac?: string,
   plugged: boolean,
   linked: boolean,
-  interface: 'e1000' | 'pci_passthrough' | 'rtl8139' | 'rtl8139_virtio' | 'virtio',
+  interface: NicInterfaceType,
   ips: Array<{
     address: string,
     version: 'v4' | 'v6'
@@ -129,7 +187,7 @@ export type NicType = {
   ipv4: Array<string>,
   ipv6: Array<string>,
   vnicProfile: {
-    id: string | null
+    id: string | null | typeof undefined
   }
 }
 
@@ -149,13 +207,59 @@ export type ApiIconType = Object
 export type IconType = Object
 
 export type ApiSshKeyType = Object
-export type SshKeyType = Object
+export type SshKeyType = {
+  key: string,
+  id: string
+}
+export type UserOptionType<T> = {
+  id?: string,
+  content: T
+}
 
 export type ApiVmConsolesType = Object
 export type VmConsolesType = Object
 
 export type ApiVmSessionsType = Object
 export type VmSessionsType = Object
+
+export type ApiUserType = Object
+
+export type GlobalUserSettingsType = {|
+  refreshInterval: number,
+  language: string,
+  showNotifications?: boolean,
+  notificationSnoozeDuration?: number
+|}
+
+export type RemoteUserOptionsType = {|
+  locale?: UserOptionType<string>,
+  refreshInterval?: UserOptionType<number>,
+  persistLocale?: UserOptionType<boolean>,
+  preferredConsole?: UserOptionType<string>,
+  fullScreenVnc?: UserOptionType<boolean>,
+  ctrlAltEndVnc?: UserOptionType<boolean>,
+  fullScreenSpice?: UserOptionType<boolean>,
+  ctrlAltEndSpice?: UserOptionType<boolean>,
+  smartcardSpice?: UserOptionType<boolean>
+|}
+
+export type UserOptionsType = {|
+  localOptions: {
+    showNotifications?: boolean,
+    notificationSnoozeDuration?: number
+  },
+  remoteOptions: RemoteUserOptionsType,
+  ssh?: SshKeyType,
+  lastTransactions: { global?: { transactionId: string } },
+  consoleOptions: {[vmId: string]: { autoconnect?: boolean}}
+|}
+
+export type UserType = {
+  userName: string,
+  lastName: string,
+  email: string,
+  principal: string
+}
 
 export type ApiPermissionType = {
   role: {
@@ -212,3 +316,23 @@ export type EventType = {
   description: string,
   severity: string
 }
+
+export type VersionType = {|
+  major: number,
+  minor: number,
+  build: number
+|}
+
+export type ApiEngineOptionType = {
+  name: string,
+  id: string,
+  values: {
+    system_option_value: Array<{
+      version: string,
+      value: string
+    }>
+  }
+}
+export type EngineOptionType = Map<string, string>
+export type EngineOptionNumberPerVersionType = Map<string, number>
+export type EngineOptionMaxNumOfVmCpusPerArchType = Map<string, { [string]: number }>

@@ -15,6 +15,7 @@ import {
   LOGIN,
   LOGOUT,
   NAVIGATE_TO_VM_DETAILS,
+  NO_REFRESH_TYPE,
   REFRESH_DATA,
   REMOVE_MISSING_VMS,
   REMOVE_VM,
@@ -55,13 +56,18 @@ export function login ({ username, domain, token, userId }) {
 /**
  * I.e. the Refresh button is clicked or scheduler event occurred (polling)
  */
-export function refresh ({ shallowFetch = false, onNavigation = false, onSchedule = false }) {
+export function refresh ({
+  pageRouterRefresh = false,
+  schedulerRefresh = false,
+  manualRefresh = false,
+  targetPage = { type: NO_REFRESH_TYPE } }) {
   return {
     type: REFRESH_DATA,
     payload: {
-      shallowFetch,
-      onNavigation,
-      onSchedule,
+      pageRouterRefresh,
+      schedulerRefresh,
+      manualRefresh,
+      targetPage,
     },
   }
 }
@@ -101,6 +107,7 @@ export function getVmsByCount ({ count, shallowFetch = true }) {
     type: GET_VMS,
     payload: {
       shallowFetch,
+      page: 1,
       count,
     },
   }
@@ -380,13 +387,12 @@ export function getVmCdRom ({ vmId, current = true }) {
   }
 }
 
-export function changeVmCdRom ({ cdrom, vmId, updateVm = true, current = true }, { correlationId, ...additionalMeta } = {}) {
+export function changeVmCdRom ({ cdrom, vmId, current = true }, { correlationId, ...additionalMeta } = {}) {
   const action = {
     type: CHANGE_VM_CDROM,
     payload: {
       cdrom,
       vmId,
-      updateVm,
       current,
     },
   }

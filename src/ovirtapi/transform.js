@@ -25,9 +25,18 @@ import type {
   ApiPermissionType, PermissionType,
   ApiEventType, EventType,
   ApiRoleType, RoleType,
+  ApiUserType, UserType,
+  UserOptionType,
+  RemoteUserOptionsType,
+  VersionType,
+  ApiBooleanType,
+  ApiEngineOptionType, EngineOptionType,
+  EngineOptionNumberPerVersionType,
+  EngineOptionMaxNumOfVmCpusPerArchType,
 } from './types'
 
 import { isWindows } from '_/helpers'
+import { DEFAULT_ARCH } from '_/constants'
 
 function vCpusCount ({ cpu }: { cpu: Object }): number {
   if (cpu && cpu.topology) {
@@ -46,6 +55,10 @@ function convertEpoch (epoch: number, defaultValue: ?Date = undefined): ?Date {
 
 function convertBool (val: ?string): boolean {
   return val ? val.toLowerCase() === 'true' : false
+}
+
+function toApiBoolean (value: any): ApiBooleanType {
+  return value ? 'true' : 'false'
 }
 
 function convertInt (val: ?(number | string), defaultValue: number = Number.NaN): number {
@@ -102,6 +115,9 @@ const VM = {
       nextRunExists: convertBool(vm['next_run_configuration_exists']),
       lastMessage: '',
       hostId: vm['host'] ? vm['host'].id : undefined,
+      customCompatibilityVersion: vm.custom_compatibility_version
+        ? `${vm.custom_compatibility_version.major}.${vm.custom_compatibility_version.minor}`
+        : undefined,
 
       startTime: convertEpoch(vm['start_time']),
       stopTime: convertEpoch(vm['stop_time']),
@@ -179,8 +195,19 @@ const VM = {
       userPermits: new Set(),
       canUserChangeCd: true,
       canUserEditVm: false,
-      canUserManipulateSnapshots: false,
       canUserEditVmStorage: false,
+      canUserManipulateSnapshots: false,
+
+      // engine option config values that map to the VM's custom compatibility version.
+      // the mapping from engine options are done in sagas. if custom compatibility version
+      // is not set, the fetch saga will set `cpuOptions` to `null`. -1 values here make it
+      // obvious if the fetch saga fails.
+      cpuOptions: {
+        maxNumOfSockets: -1,
+        maxNumOfCores: -1,
+        maxNumOfThreads: -1,
+        maxNumOfVmCpus: -1,
+      },
     }
 
     if (vm.cdroms && vm.cdroms.cdrom) {
@@ -271,7 +298,7 @@ const VM = {
       bios: vm.hasOwnProperty('bootMenuEnabled')
         ? {
           boot_menu: {
-            enabled: vm.bootMenuEnabled,
+            enabled: toApiBoolean(vm.bootMenuEnabled),
           },
         }
         : undefined,
@@ -299,13 +326,14 @@ const VM = {
 //
 //
 const VmStatistics = {
-  toInternal ({ statistics }: { statistics: Array<ApiVmStatisticType> }): VmStatisticsType {
+  toInternal ({ statistics = [] }: { statistics: Array<ApiVmStatisticType> } = {}): VmStatisticsType {
     const base: VmStatisticsType = {
       memory: {},
       cpu: {},
       network: {},
       elapsedUptime: {
-        datum: 0,
+        firstDatum: undefined,
+        datum: [ 0 ],
         unit: 'seconds',
         description: 'Elapsed VM runtime (default to 0)',
       },
@@ -314,24 +342,30 @@ const VmStatistics = {
 
     for (const stat: ApiVmStatisticType of statistics) {
       if (stat.name === 'elapsed.time') {
-        base.elapsedUptime.datum = stat.values.value[0].datum
+        base.elapsedUptime.datum = stat.values.value.map((val: any) => val.datum)
+        base.elapsedUptime.firstDatum = base.elapsedUptime.datum[0]
         base.elapsedUptime.description = stat.description
       }
 
       if (stat.kind !== 'gauge') continue
 
-      // no values -> undefined, 1 value -> value.datum, >1 values -> [...values.datum]
-      // ?disks.usage -> {detail...}
-      let datum: any =
-        stat.values &&
-        stat.values.value &&
-        (stat.name === 'disks.usage'
-          ? stat.values.value[0].detail || null
-          : stat.values.value.length === 1
-            ? stat.values.value[0].datum
-            : stat.values.value.map(value => value.datum))
+      // no values -> undefined, >0 value -> [...values.datum]
+      let datum: any
+      if (stat.values && stat.values.value) {
+        if (stat.type === 'decimal' || stat.type === 'integer') {
+          datum = Array.isArray(stat.values.value)
+            ? stat.values.value.map((val: any) => val.datum)
+            : [stat.values.value.datum]
+        }
 
-      if (stat.name === 'disks.usage' && datum !== null) {
+        if (stat.type === 'string') {
+          datum = Array.isArray(stat.values.value)
+            ? stat.values.value.map((val: any) => val.detail)
+            : [stat.values.value.detail]
+        }
+      }
+
+      if (stat.name === 'disks.usage' && !!datum) {
         datum = JSON.parse(datum)
         datum = datum.map(data => {
           data.total = convertInt(data.total)
@@ -339,9 +373,16 @@ const VmStatistics = {
           return data
         })
       }
+
+      const firstDatum: any =
+        (datum && datum.length > 0)
+          ? datum[0]
+          : undefined
+
       const nameParts = /^(memory|cpu|network|disks)\.(.*)?$/.exec(stat.name)
       if (nameParts) {
         base[nameParts[1]][nameParts[2]] = {
+          firstDatum,
           datum,
           unit: stat.unit,
           description: stat.description,
@@ -374,8 +415,12 @@ const Template = {
       clusterId: template.cluster ? template.cluster.id : null,
       memory: template.memory,
       type: template.type,
+      customCompatibilityVersion: template.custom_compatibility_version
+        ? `${template.custom_compatibility_version.major}.${template.custom_compatibility_version.minor}`
+        : undefined,
 
       cpu: {
+        arch: template.cpu ? template.cpu.architecture : undefined,
         vCPUs: vCpusCount({ cpu: template.cpu }),
         topology: {
           cores: convertInt(template.cpu.topology.cores),
@@ -411,6 +456,17 @@ const Template = {
       permissions,
       userPermits: new Set(),
       canUserUseTemplate: false,
+
+      // engine option config values that map to the Templates's custom compatibility version.
+      // the mapping from engine options are done in sagas. if custom compatibility version
+      // is not set, the fetch saga will set `cpuOptions` to `null`. -1 values here make it
+      // obvious if the fetch saga fails.
+      cpuOptions: {
+        maxNumOfSockets: -1,
+        maxNumOfCores: -1,
+        maxNumOfThreads: -1,
+        maxNumOfVmCpus: -1,
+      },
     })
   },
 
@@ -460,7 +516,7 @@ const Snapshot = {
       type: snapshot.snapshot_type || '',
       date: snapshot.date || Date.now(),
       status: snapshot.snapshot_status || '',
-      persistMemoryState: snapshot.persist_memorystate === 'true',
+      persistMemoryState: convertBool(snapshot.persist_memorystate),
       isActive: snapshot.snapshot_type === 'active',
     }
   },
@@ -468,6 +524,7 @@ const Snapshot = {
   toApi ({ snapshot }: { snapshot: SnapshotType }): ApiSnapshotType {
     return {
       description: snapshot.description,
+      persist_memorystate: toApiBoolean(snapshot.persistMemoryState),
     }
   },
 }
@@ -516,8 +573,8 @@ const DiskAttachment = {
     const forApi: ApiDiskAttachmentType = {
       // disk_attachment part
       id: disk.attachmentId,
-      active: disk.active,
-      bootable: disk.bootable,
+      active: toApiBoolean(disk.active),
+      bootable: toApiBoolean(disk.bootable),
       interface: disk.iface,
     }
 
@@ -529,7 +586,7 @@ const DiskAttachment = {
 
         storage_type: 'image',
         format: disk.format || (disk.sparse && disk.sparse ? 'cow' : 'raw'),
-        sparse: disk.sparse,
+        sparse: toApiBoolean(disk.sparse),
         provisioned_size: disk.provisionedSize,
 
         storage_domains: disk.storageDomainId && {
@@ -569,6 +626,7 @@ const DataCenter = {
     return {
       id: dataCenter.id,
       name: dataCenter.name,
+      version: `${dataCenter.version.major}.${dataCenter.version.minor}`,
       status: dataCenter.status,
       storageDomains,
       permissions,
@@ -656,8 +714,10 @@ const Cluster = {
     const c: Object = {
       id: cluster.id,
       name: cluster.name,
+      version: `${cluster.version.major}.${cluster.version.minor}`,
       dataCenterId: cluster.data_center && cluster.data_center.id,
       architecture: cluster.cpu && cluster.cpu.architecture,
+      cpuType: cluster.cpu && cluster.cpu.type,
 
       memoryPolicy: {
         overCommitPercent:
@@ -672,6 +732,15 @@ const Cluster = {
       permissions,
       userPermits: new Set(),
       canUserUseCluster: false,
+
+      // engine option config values that map to cluster compatibility version. mappings
+      // are done in sagas. -1 values make it obvious if the fetch saga fails
+      cpuOptions: {
+        maxNumOfSockets: -1,
+        maxNumOfCores: -1,
+        maxNumOfThreads: -1,
+        maxNumOfVmCpus: -1,
+      },
     }
 
     if (cluster.networks && cluster.networks.network && cluster.networks.network.length > 0) {
@@ -689,10 +758,11 @@ const Cluster = {
 //
 const Nic = {
   toInternal ({ nic }: { nic: ApiNicType }): NicType {
+    const { mac: { address: nicMacAddress = '' } = {} } = nic
     const ips =
       nic.reported_devices && nic.reported_devices.reported_device
         ? nic.reported_devices.reported_device
-          .filter(device => !!device.ips && !!device.ips.ip)
+          .filter(device => !!device.ips && !!device.ips.ip && device.mac && device.mac.address === nicMacAddress)
           .map(device => device.ips.ip)
           .reduce((ips, ipArray) => [...ipArray, ...ips], [])
         : []
@@ -718,8 +788,8 @@ const Nic = {
     const res = {
       id: nic.id,
       name: nic.name,
-      plugged: nic.plugged,
-      linked: nic.linked,
+      plugged: toApiBoolean(nic.plugged),
+      linked: toApiBoolean(nic.linked),
       interface: nic.interface,
       vnic_profile: undefined,
     }
@@ -847,8 +917,8 @@ const SSHKey = {
 //
 //
 const VmConsoles = {
-  toInternal ({ consoles }: { consoles: ApiVmConsolesType }): Array<VmConsolesType> {
-    return consoles['graphics_console'].map((c: Object): Object => {
+  toInternal ({ consoles: { graphics_console: graphicConsoles = [] } = {} }: { consoles: ApiVmConsolesType }): Array<VmConsolesType> {
+    return graphicConsoles.map((c: Object): Object => {
       return {
         id: c.id,
         protocol: c.protocol,
@@ -880,7 +950,7 @@ const VmSessions = {
 //
 //
 const Permissions = {
-  toInternal ({ permissions }: { permissions: Array<ApiPermissionType> }): Array<PermissionType> {
+  toInternal ({ permissions = [] }: { permissions: Array<ApiPermissionType> }): Array<PermissionType> {
     return permissions.map(permission => ({
       name: permission.role.name,
       userId: permission.user && permission.user.id,
@@ -948,10 +1018,172 @@ const Event = {
   toApi: undefined,
 }
 
+const RemoteUserOptions = {
+  toInternal: (options: Array<UserOptionType<string> & {name: string}> = []): RemoteUserOptionsType => {
+    const vmPortalOptions: Array<[string, UserOptionType<any>]> = options
+      .map(option => RemoteUserOption.toInternal(option))
+      // non-vmPortal props were reduced to undefined
+      // filter them out
+      .filter(Boolean)
+
+    const fromEntries = {}
+    vmPortalOptions.forEach(([name, option]) => { fromEntries[name] = option })
+
+    // pick only options supported by this version of the UI
+    const {
+      locale,
+      refreshInterval,
+      persistLocale,
+      preferredConsole,
+      fullScreenVnc,
+      ctrlAltEndVnc,
+      fullScreenSpice,
+      ctrlAltEndSpice,
+      smartcardSpice,
+    } = fromEntries
+
+    return {
+      locale,
+      refreshInterval,
+      persistLocale,
+      preferredConsole,
+      fullScreenVnc,
+      ctrlAltEndVnc,
+      fullScreenSpice,
+      ctrlAltEndSpice,
+      smartcardSpice,
+    }
+  },
+}
+
+const VM_PORTAL_PREFIX = 'vmPortal.'
+
+const RemoteUserOption = {
+  canTransformToInternal: (name: string): boolean => !!name && name.startsWith(VM_PORTAL_PREFIX),
+  toInternal: ({ name, content, id }: UserOptionType<string> & {name: string} = {}): ?[string, UserOptionType<any>] => {
+    if (!RemoteUserOption.canTransformToInternal(name)) {
+      return undefined
+    }
+    return [
+      name.replace(VM_PORTAL_PREFIX, ''),
+      {
+        id,
+        content: JSON.parse(content),
+      }]
+  },
+  toApi: (name: string, option: UserOptionType<Object>): UserOptionType<string> & {name: string} => {
+    return ({
+      name: `${VM_PORTAL_PREFIX}${name}`,
+      // double encoding - value is transferred as a string
+      content: JSON.stringify(option.content),
+    })
+  },
+}
+
+const User = {
+  toInternal ({ user: { user_name: userName, last_name: lastName, email, principal } = {} }: { user: ApiUserType }): UserType {
+    return {
+      userName,
+      lastName,
+      email,
+      principal,
+    }
+  },
+
+  toApi: undefined,
+}
+
+const Version = {
+  toInternal ({ major = 0, minor = 0, build = 0 }: any): VersionType {
+    return {
+      major: Number(major),
+      minor: Number(minor),
+      build: Number(build),
+    }
+  },
+}
+
+//
+//
+//
+const EngineOption = {
+  toInternal (option: ApiEngineOptionType): EngineOptionType {
+    const values = option && option.values && option.values.system_option_value
+      ? option.values.system_option_value
+      : []
+
+    const engineOption: EngineOptionType = new Map()
+    for (const value of values) {
+      engineOption.set(value.version, value.value)
+    }
+    return engineOption
+  },
+}
+
+const EngineOptionNumberPerVersion = {
+  toInternal (values: EngineOptionType): EngineOptionNumberPerVersionType {
+    const numberPerVersion: EngineOptionNumberPerVersionType = new Map()
+
+    for (const [version, numberString] of values) {
+      numberPerVersion.set(version, convertInt(numberString))
+    }
+
+    return numberPerVersion
+  },
+}
+
+const EngineOptionMaxNumOfVmCpusPerArch = {
+  /**
+   * Transform a `MaxNumOfVmCpus` config string of the format:
+   *     "{ppc=123, x86=456, s390x=789}"
+   *
+   * to an Object map of the structure:
+   *     [arch type]: maxCount
+   *
+   * Cluster architecture types are slightly different than the config value.  The
+   * names are mapped in the transform from the config value to the real types that
+   * will be seen on the rest api.  Actual cluster architecture types can be seen
+   * in the api docs:
+   *     http://ovirt.github.io/ovirt-engine-api-model/master/#types/architecture
+   */
+  toInternal (cpusPerArchPerVersion: EngineOptionType): EngineOptionMaxNumOfVmCpusPerArchType {
+    const versionToArchToCount: EngineOptionMaxNumOfVmCpusPerArchType = new Map()
+
+    for (const [version, cpusPerArch] of cpusPerArchPerVersion) {
+      const archToCount: { [string]: number} = {
+        ppc64: 1,
+        x86_64: 1,
+        s390x: 1,
+        [DEFAULT_ARCH]: 1,
+      }
+
+      const [, ppc] = cpusPerArch.match(/ppc=(\d+)/) || []
+      if (ppc) {
+        archToCount.ppc64 = parseInt(ppc, 10)
+      }
+
+      const [, x86] = cpusPerArch.match(/x86=(\d+)/) || []
+      if (x86) {
+        archToCount.x86_64 = parseInt(x86, 10)
+      }
+
+      const [, s390x] = cpusPerArch.match(/s390x=(\d+)/) || []
+      if (s390x) {
+        archToCount.s390x = parseInt(s390x, 10)
+      }
+
+      versionToArchToCount.set(version, archToCount)
+    }
+
+    return versionToArchToCount
+  },
+}
+
 //
 // Export each transforms individually so they can be consumed individually
 //
 export {
+  convertBool,
   VM,
   Pool,
   CdRom,
@@ -971,8 +1203,16 @@ export {
   Icon,
   VmConsoles,
   VmSessions,
+  VmStatistics,
   CloudInit,
   Permissions,
   Event,
   Role,
+  User,
+  RemoteUserOptions,
+  RemoteUserOption,
+  Version,
+  EngineOption,
+  EngineOptionNumberPerVersion,
+  EngineOptionMaxNumOfVmCpusPerArch,
 }

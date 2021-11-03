@@ -1,54 +1,82 @@
 import Immutable from 'immutable'
 import { actionReducer } from './utils'
+
+import { DefaultEngineOptions } from '_/config'
 import {
   APP_CONFIGURED,
+  DEFAULT_ENGINE_OPTION_VERSION,
   LOGIN_FAILED,
   LOGIN_SUCCESSFUL,
   LOGOUT,
+  REFRESH_DATA,
   SET_ADMINISTRATOR,
-  SET_CURRENT_PAGE,
   SET_CPU_TOPOLOGY_OPTIONS,
+  SET_CURRENT_PAGE,
   SET_DEFAULT_TIMEZONE,
+  SET_GLOBAL_DEFAULT_CONSOLE,
+  SET_GLOBAL_DEFAULT_VNC_MODE,
   SET_OVIRT_API_VERSION,
   SET_USB_AUTOSHARE,
   SET_USB_FILTER,
   SET_USER_FILTER_PERMISSION,
   SET_USER_GROUPS,
   SET_USER_SESSION_TIMEOUT_INTERVAL,
+  SET_USER,
   SET_WEBSOCKET,
   SHOW_TOKEN_EXPIRED_MSG,
 } from '_/constants'
 
+import { toUiConsole } from '_/utils'
+
 const initialState = Immutable.fromJS({
-  appConfigured: false,
-  loginToken: undefined,
-  logoutWasManual: false,
-  isTokenExpired: false,
-  user: {
-    name: undefined,
-    id: undefined,
-  },
+  lastRefresh: 0,
   oVirtApiVersion: {
     major: undefined,
     minor: undefined,
     passed: undefined,
   },
+  blankTemplateId: '00000000-0000-0000-0000-000000000000', // "engine/api/" -> special_objects.blank_template.id
+
+  loginToken: undefined,
+  logoutWasManual: false,
+  isTokenExpired: false,
+  appConfigured: false,
+
+  currentPage: {},
+  user: {
+    name: undefined,
+    id: undefined,
+  },
+  userGroups: [],
+
+  // allowed values: vnc, spice
+  defaultConsole: DefaultEngineOptions.ClientModeConsoleDefault,
+  // allowed values: Native, NoVnc
+  defaultVncMode: DefaultEngineOptions.ClientModeVncDefault,
+  // derrived from defaultConsole and defaultVncMode
+  // allowed values: NativeVnc, BrowserVnc, spice, rdp
+  defaultUiConsole: toUiConsole(DefaultEngineOptions.ClientModeVncDefault, DefaultEngineOptions.ClientModeConsoleDefault),
+
   filter: true,
   isFilterChecked: false,
   administrator: false,
-  userSessionTimeoutInterval: null,
-  usbAutoshare: null,
-  usbFilter: null,
-  userGroups: [],
-  currentPage: {},
-  maxNumberOfSockets: 16,
-  maxNumberOfCores: 254,
-  maxNumberOfThreads: 8,
-  maxNumOfVmCpus: 1,
-  defaultGeneralTimezone: 'Etc/GMT',
-  defaultWindowsTimezone: 'GMT Standard Time',
-  websocket: null,
-  blankTemplateId: '00000000-0000-0000-0000-000000000000', // "engine/api/" -> special_objects.blank_template.id
+
+  cpuOptions: {
+    maxNumOfSockets: new Map([[ DEFAULT_ENGINE_OPTION_VERSION, DefaultEngineOptions.MaxNumOfVmSockets ]]),
+    maxNumOfCores: new Map([[ DEFAULT_ENGINE_OPTION_VERSION, DefaultEngineOptions.MaxNumOfCpuPerSocket ]]),
+    maxNumOfThreads: new Map([[ DEFAULT_ENGINE_OPTION_VERSION, DefaultEngineOptions.MaxNumOfThreadsPerCpu ]]),
+    maxNumOfVmCpusPerArch: new Map([[ DEFAULT_ENGINE_OPTION_VERSION, DefaultEngineOptions.MaxNumOfVmCpusPerArch ]]),
+  },
+
+  usbAutoshare: DefaultEngineOptions.SpiceUsbAutoShare,
+  usbFilter: DefaultEngineOptions.getUSBFilter,
+
+  userSessionTimeoutInterval: DefaultEngineOptions.UserSessionTimeOutInterval,
+
+  defaultGeneralTimezone: DefaultEngineOptions.DefaultGeneralTimeZone,
+  defaultWindowsTimezone: DefaultEngineOptions.DefaultWindowsTimeZone,
+
+  websocket: DefaultEngineOptions.WebSocketProxy,
 })
 
 const config = actionReducer(initialState, {
@@ -95,6 +123,20 @@ const config = actionReducer(initialState, {
   [SET_WEBSOCKET] (state, { payload: { websocket } }) {
     return state.set('websocket', Immutable.fromJS(websocket))
   },
+  [SET_USER] (state, { payload: { user } }) {
+    return state.mergeDeep({ user })
+  },
+  [SET_GLOBAL_DEFAULT_CONSOLE] (state, { payload: { defaultConsole } }) {
+    const defaultVncMode = state.get('defaultVncMode')
+
+    return state.set('defaultConsole', defaultConsole)
+      .set('defaultUiConsole', toUiConsole(defaultVncMode, defaultConsole))
+  },
+  [SET_GLOBAL_DEFAULT_VNC_MODE] (state, { payload: { defaultVncMode } }) {
+    const defaultConsole = state.get('defaultConsole')
+    return state.set('defaultVncMode', defaultVncMode)
+      .set('defaultUiConsole', toUiConsole(defaultVncMode, defaultConsole))
+  },
   [SET_USER_GROUPS] (state, { payload: { groups } }) {
     return state.set('userGroups', groups)
   },
@@ -102,17 +144,17 @@ const config = actionReducer(initialState, {
     return state.set('currentPage', Object.assign({}, payload))
   },
   [SET_CPU_TOPOLOGY_OPTIONS] (state, { payload: {
-    maxNumberOfSockets,
-    maxNumberOfCores,
-    maxNumberOfThreads,
-    maxNumOfVmCpus,
+    maxNumOfSockets,
+    maxNumOfCores,
+    maxNumOfThreads,
+    maxNumOfVmCpusPerArch,
   } }) {
-    return state.merge({
-      maxNumberOfSockets,
-      maxNumberOfCores,
-      maxNumberOfThreads,
-      maxNumOfVmCpus,
-    })
+    return state.set('cpuOptions', Immutable.fromJS({
+      maxNumOfSockets,
+      maxNumOfCores,
+      maxNumOfThreads,
+      maxNumOfVmCpusPerArch,
+    }))
   },
   [SET_DEFAULT_TIMEZONE] (state, { payload: {
     defaultGeneralTimezone,
@@ -122,6 +164,9 @@ const config = actionReducer(initialState, {
       defaultGeneralTimezone,
       defaultWindowsTimezone,
     })
+  },
+  [REFRESH_DATA] (state) {
+    return state.set('lastRefresh', Date.now())
   },
   [APP_CONFIGURED] (state) {
     return state.set('appConfigured', true)

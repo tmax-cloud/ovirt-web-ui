@@ -6,9 +6,15 @@ import {
 
 import AppConfiguration from '_/config'
 import { hidePassword } from '_/helpers'
-import { msg } from '_/intl'
 import Api from '_/ovirtapi'
 import { getUserPermits } from '_/utils'
+import semverGte from 'semver/functions/gte'
+import semverValid from 'semver/functions/valid'
+
+import {
+  DEFAULT_ARCH,
+  DEFAULT_ENGINE_OPTION_VERSION,
+} from '_/constants'
 
 import {
   checkTokenExpired,
@@ -22,23 +28,16 @@ import {
 export const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
- * Compare the actual { major, minor } version to the required { major, minor } and
+ * Compare the actual { major, minor, build} version to the required { major, minor} and
  * return if the **actual** is greater then or equal to **required**.
  *
  * Backward compatibility of the API is assumed.
  */
 export function compareVersion (actual, required) {
-  console.log(`compareVersion(), actual=${JSON.stringify(actual)}, required=${JSON.stringify(required)}`)
-
-  if (actual.major >= required.major) {
-    if (actual.major === required.major) {
-      if (actual.minor < required.minor) {
-        return false
-      }
-    }
-    return true
-  }
-  return false
+  const fullActual = `${actual.major}.${actual.minor}.${actual.build}`
+  const fullRequired = `${required.major}.${required.minor}.0`
+  console.log(`compareVersion(), actual=${fullActual}, required=${fullRequired}`)
+  return !!semverValid(fullActual) && semverGte(fullActual, fullRequired)
 }
 
 export function* callExternalAction (methodName, method, action = {}, canBeMissing = false) {
@@ -54,15 +53,15 @@ export function* callExternalAction (methodName, method, action = {}, canBeMissi
         yield put(checkTokenExpired())
       }
 
-      let shortMessage = shortErrorMessage({ action })
+      let messageDescriptor = shortErrorMessage({ action })
       if (e.status === 0 && e.statusText === 'error') { // special case, mixing https and http
-        shortMessage = 'oVirt API connection failed'
+        messageDescriptor = { id: 'apiConnectionFailed' }
         e.statusText = 'Unable to connect to oVirt REST API. Please check URL and protocol (https).'
       }
 
       yield put(failedExternalAction({
         exception: e,
-        shortMessage,
+        messageDescriptor,
         failedAction: action,
       }))
     }
@@ -113,27 +112,30 @@ export function* waitTillEqual (leftArg, rightArg, limit) {
 }
 
 const shortMessages = {
-  'START_VM': msg.failedToStartVm(),
-  'RESTART_VM': msg.failedToRestartVm(),
-  'SHUTDOWN_VM': msg.failedToShutdownVm(),
-  'DOWNLOAD_CONSOLE_VM': msg.failedToGetVmConsole(),
-  'SUSPEND_VM': msg.failedToSuspendVm(),
-  'REMOVE_VM': msg.failedToRemoveVm(),
+  'START_VM': 'failedToStartVm',
+  'RESTART_VM': 'failedToRestartVm',
+  'SHUTDOWN_VM': 'failedToShutdownVm',
+  'DOWNLOAD_CONSOLE_VM': 'failedToGetVmConsole',
+  'SUSPEND_VM': 'failedToSuspendVm',
+  'REMOVE_VM': 'failedToRemoveVm',
 
-  'GET_ICON': msg.failedToRetrieveVmIcon(),
-  'INTERNAL_CONSOLE': msg.failedToRetrieveVmConsoleDetails(),
-  'INTERNAL_CONSOLES': msg.failedToRetrieveListOfVmConsoles(),
-  'GET_DISK_DETAILS': msg.failedToRetrieveDiskDetails(),
-  'GET_DISK_ATTACHMENTS': msg.failedToRetrieveVmDisks(),
-  'GET_ISO_FILES': msg.failedToRetrieveIsoStorages(),
+  'GET_ICON': 'failedToRetrieveVmIcon',
+  'INTERNAL_CONSOLE': 'failedToRetrieveVmConsoleDetails',
+  'INTERNAL_CONSOLES': 'failedToRetrieveListOfVmConsoles',
+  'GET_DISK_DETAILS': 'failedToRetrieveDiskDetails',
+  'GET_DISK_ATTACHMENTS': 'failedToRetrieveVmDisks',
+  'GET_ISO_FILES': 'failedToRetrieveIsoStorages',
 
-  'GET_VM': msg.failedToRetrieveVmDetails(),
-  'CHANGE_VM_ICON': msg.failedToChangeVmIcon(),
-  'CHANGE_VM_ICON_BY_ID': msg.failedToChangeVmIconToDefault(),
+  'GET_VM': 'failedToRetrieveVmDetails',
+  'CHANGE_VM_ICON': 'failedToChangeVmIcon',
+  'CHANGE_VM_ICON_BY_ID': 'failedToChangeVmIconToDefault',
 }
 
-export function shortErrorMessage ({ action }) {
-  return shortMessages[action.type] ? shortMessages[action.type] : msg.actionFailed({ action: action.type })
+function shortErrorMessage ({ action: { type = 'NONE' } }) {
+  if (shortMessages[type]) {
+    return { id: shortMessages[type] }
+  }
+  return { id: 'actionFailed', params: { action: type } }
 }
 
 export function* foreach (array, fn, context) {
@@ -162,7 +164,10 @@ export function* delayInMsSteps (count = 20, msMultiplier = 2000) {
 
 export function* fetchPermits ({ entityType, id }) {
   const permissions = yield callExternalAction(`get${entityType}Permissions`, Api[`get${entityType}Permissions`], { payload: { id } })
-  return getUserPermits(Api.permissionsToInternal({ permissions: permissions.permission }))
+  if (permissions && Array.isArray(permissions.permission)) {
+    return getUserPermits(Api.permissionsToInternal({ permissions: permissions.permission }))
+  }
+  return []
 }
 
 export const PermissionsType = {
@@ -181,18 +186,15 @@ export function* entityPermissionsToUserPermits (entity) {
     ? Array.isArray(entity.permissions) ? entity.permissions : [entity.permissions]
     : []
 
-  const userFilter = yield select(state => state.config.get('filter'))
   const userGroups = yield select(state => state.config.get('userGroups'))
   const userId = yield select(state => state.config.getIn(['user', 'id']))
   const roles = yield select(state => state.roles)
 
   const permitNames = []
   for (const permission of permissions) {
-    if (userFilter ||
-      (
-        (permission.groupId && userGroups.includes(permission.groupId)) ||
-        (permission.userId && permission.userId === userId)
-      )
+    if (
+      (permission.groupId && userGroups.includes(permission.groupId)) ||
+      (permission.userId && permission.userId === userId)
     ) {
       const role = roles.get(permission.roleId)
       if (!role) {
@@ -204,4 +206,27 @@ export function* entityPermissionsToUserPermits (entity) {
   }
 
   return new Set(permitNames)
+}
+
+/**
+ * Map an entity's cpuOptions config values from engine options. The mappings are based
+ * on the (custom)? compatibility version and CPU architecture.
+ */
+export function* mapCpuOptions (version, architecture) {
+  const [ maxNumSockets, maxNumOfCores, maxNumOfThreads, maxNumOfVmCpusPerArch ] =
+    yield select(({ config }) => [
+      config.getIn(['cpuOptions', 'maxNumOfSockets']),
+      config.getIn(['cpuOptions', 'maxNumOfCores']),
+      config.getIn(['cpuOptions', 'maxNumOfThreads']),
+      config.getIn(['cpuOptions', 'maxNumOfVmCpusPerArch']),
+    ])
+
+  const maxNumOfVmCpusPerArch_ = maxNumOfVmCpusPerArch.get(version) || maxNumOfVmCpusPerArch.get(DEFAULT_ENGINE_OPTION_VERSION)
+
+  return {
+    maxNumOfSockets: maxNumSockets.get(version) || maxNumSockets.get(DEFAULT_ENGINE_OPTION_VERSION),
+    maxNumOfCores: maxNumOfCores.get(version) || maxNumOfCores.get(DEFAULT_ENGINE_OPTION_VERSION),
+    maxNumOfThreads: maxNumOfThreads.get(version) || maxNumOfThreads.get(DEFAULT_ENGINE_OPTION_VERSION),
+    maxNumOfVmCpus: maxNumOfVmCpusPerArch_[architecture] || maxNumOfVmCpusPerArch_[DEFAULT_ARCH],
+  }
 }

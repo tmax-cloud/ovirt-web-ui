@@ -11,7 +11,6 @@ import {
   SET_FILTERS,
   SET_VM_SORT,
   SET_VM_ACTION_RESULT,
-  SET_VM_CDROM,
   SET_VM_DISKS,
   SET_VM_NICS,
   SET_VM_SESSIONS,
@@ -25,13 +24,13 @@ import {
   VM_ACTION_IN_PROGRESS,
 } from '_/constants'
 import { actionReducer, removeMissingItems } from './utils'
-import { sortFields } from '_/utils'
+import { SortFields } from '_/utils'
 
 const initialState = Immutable.fromJS({
   vms: {},
   pools: {},
   filters: {},
-  sort: { ...sortFields[0], isAsc: true },
+  sort: { ...SortFields.NAME, isAsc: true },
 
   missedVms: Immutable.Set(),
 
@@ -109,15 +108,6 @@ const vms = actionReducer(initialState, {
       if (existing) {
         state = state.mergeDeepIn(['vms', vmId, 'disks', existing[0]], Immutable.fromJS(disk))
       }
-    }
-    return state
-  },
-
-  [SET_VM_CDROM] (state, { payload: { vmId, cdrom } }) {
-    if (state.getIn(['vms', vmId])) {
-      return state.setIn(['vms', vmId, 'cdrom'], Immutable.fromJS(cdrom)) // deep immutable
-    } else { // fail, if VM not found
-      console.error(`vms[${SET_VM_CDROM}] reducer: vmId ${vmId} not found`)
     }
     return state
   },
@@ -221,14 +211,14 @@ const vms = actionReducer(initialState, {
     return state
   },
 
-  [FAILED_EXTERNAL_ACTION] (state, { payload: { message, shortMessage, type, failedAction } }) {
+  [FAILED_EXTERNAL_ACTION] (state, { payload: { message, messageDescriptor, type, failedAction } }) {
     if (message && failedAction && failedAction.payload && failedAction.payload.vmId) {
       const vmId = failedAction.payload.vmId
       if (state.getIn(['vms', vmId])) {
-        return state.setIn(['vms', vmId, 'lastMessage'], shortMessage || message)
+        return state.setIn(['vms', vmId, 'lastMessage'], messageDescriptor || message)
       } else {
         console.error(`API reports an error associated to nonexistent VM ${vmId}, error`,
-          { message, shortMessage, type, failedAction })
+          { message, messageDescriptor, type, failedAction })
       }
     }
 

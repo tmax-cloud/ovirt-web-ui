@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import PropTypes from 'prop-types'
 import {
   CardTitle,
@@ -13,7 +13,7 @@ import {
 import DonutChart from './UtilizationCharts/DonutChart'
 import AreaChart from './UtilizationCharts/AreaChart'
 
-import { msg } from '_/intl'
+import { MsgContext } from '_/intl'
 
 import style from './style.css'
 
@@ -26,7 +26,8 @@ import NoLiveData from './NoLiveData'
  * right.
  */
 const CpuCharts = ({ cpuStats, isRunning, id, vcpus }) => {
-  const cpuUsed = cpuStats['current.total'].datum / vcpus // the average value considering the number of VM CPUs, same as in Admin Portal
+  const { msg } = useContext(MsgContext)
+  const cpuUsed = cpuStats['current.total'].firstDatum / vcpus // the average value considering the number of VM CPUs, same as in Admin Portal
   const cpuAvailable = 100 - cpuUsed
 
   // NOTE: CPU history comes sorted from newest to oldest
@@ -53,12 +54,12 @@ const CpuCharts = ({ cpuStats, isRunning, id, vcpus }) => {
               {
                 x: msg.utilizationCardLegendUsedP(),
                 y: cpuUsed,
-                label: `${msg.utilizationCardLegendUsed()} - ${cpuUsed}%`,
+                label: `${msg.utilizationCardLegendUsed()}: ${cpuUsed}%`,
               },
               {
                 x: msg.utilizationCardLegendAvailableP(),
                 y: cpuAvailable,
-                label: `${msg.utilizationCardAvailable()} - ${cpuAvailable}%`,
+                label: `${msg.utilizationCardAvailable()}: ${cpuAvailable}%`,
               },
             ]}
             subTitle={msg.utilizationCardLegendUsedP()}

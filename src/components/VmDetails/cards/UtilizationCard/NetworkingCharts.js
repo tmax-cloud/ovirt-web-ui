@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useContext } from 'react'
 import PropTypes from 'prop-types'
 import {
   CardTitle,
@@ -13,7 +13,7 @@ import {
 import DonutChart from './UtilizationCharts/DonutChart'
 import AreaChart from './UtilizationCharts/AreaChart'
 
-import { msg } from '_/intl'
+import { MsgContext } from '_/intl'
 
 import style from './style.css'
 
@@ -29,9 +29,10 @@ import NoLiveData from './NoLiveData'
  *       statistics from the NICs to get different, finer grained details.
  */
 const NetworkingCharts = ({ netStats, isRunning, id }) => {
+  const { msg } = useContext(MsgContext)
   const haveNetworkStats = !!netStats['current.total']
 
-  const used = (netStats['current.total'] && netStats['current.total'].datum) || 0
+  const used = (netStats['current.total'] && netStats['current.total'].firstDatum) || 0
   const available = 100 - used
 
   // NOTE: Network history comes sorted from newest to oldest
@@ -60,12 +61,12 @@ const NetworkingCharts = ({ netStats, isRunning, id }) => {
               {
                 x: msg.utilizationCardLegendUsedP(),
                 y: used,
-                label: `${msg.utilizationCardLegendUsed()} - ${used}%`,
+                label: `${msg.utilizationCardLegendUsed()}: ${used}%`,
               },
               {
                 x: msg.utilizationCardLegendAvailableP(),
                 y: available,
-                label: `${msg.utilizationCardAvailable()} - ${available}%`,
+                label: `${msg.utilizationCardAvailable()}: ${available}%`,
               },
             ]}
             subTitle={msg.utilizationCardLegendUsedP()}
