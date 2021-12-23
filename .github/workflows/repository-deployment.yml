@@ -82,6 +82,6 @@ jobs:
             DOWNLOAD_SRC=http://172.21.7.2/github/ovirt-web-ui/pull-requests/${PR_NUMBER}/
           fi
           ${RUN_CMD} mkdir -p ${DOWNLOAD_DST}/Packages
-          ${RUN_CMD} rm -f ${DOWNLOAD_DST}/Packages/ovirt-web-ui*
+          ${RUN_CMD} sh -c 'rm '${DOWNLOAD_DST}'/Packages/ovirt-web-ui*'
           ${RUN_CMD} wget -r -np -nd -A .rpm ${DOWNLOAD_SRC} -P ${DOWNLOAD_DST}/Packages --read-timeout=60
           ${RUN_CMD} createrepo ${DOWNLOAD_DST}
