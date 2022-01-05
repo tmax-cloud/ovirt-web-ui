@@ -12,6 +12,7 @@ jobs:
         run: |
           WORK_DIR=/home/github/ovirt-web-ui
           TARGET_DIR=${WORK_DIR}/deployment-`date +%s`
+          rm -rf ${TARGET_DIR}
           git clone http://github.com/tmax-cloud/ovirt-web-ui.git ${TARGET_DIR} && cd ${TARGET_DIR}
           BRANCH=$(echo $GITHUB_REF | awk 'BEGIN { FS = "/" } ; { print $3 }')
           if [ ${BRANCH} == 'supervm-releases' ]; then
@@ -31,7 +32,6 @@ jobs:
             echo ::set-output name=JOB_FILE::${JOB_FILE}
           fi
           echo "IS_MERGE: ${IS_MERGE}"
-          cd ${WORK_DIR} && rm -rf ${TARGET_DIR}
           echo ::set-output name=WORK_DIR::${WORK_DIR}
           echo ::set-output name=TARGET_DIR::${TARGET_DIR}
           echo ::set-output name=IS_MERGE::${IS_MERGE}
@@ -86,3 +86,7 @@ jobs:
           ${RUN_CMD} rm -f ${DOWNLOAD_DST}/Packages/ovirt-web-ui*
           ${RUN_CMD} wget -r -np -nd -A .rpm ${DOWNLOAD_SRC} -P ${DOWNLOAD_DST}/Packages --read-timeout=60
           ${RUN_CMD} createrepo ${DOWNLOAD_DST}
+      - name: Clean
+        if: always()
+        run: |
+          cd ${{ steps.vars.outputs.WORK_DIR }} && rm -rf ${{ steps.vars.outputs.TARGET_DIR }}
