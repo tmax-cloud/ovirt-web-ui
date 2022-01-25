@@ -8,7 +8,7 @@ const Tooltip = ({ id, tooltip, placement, children, ...rest }) => {
       overlay={
         <PFTooltip id={id}>{tooltip}</PFTooltip>
       }
-      placement={placement || 'top'}
+      placement={placement || 'left'}
       {...rest}
     >
       { children }
