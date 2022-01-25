@@ -144,7 +144,7 @@ class SnapshotItem extends React.Component {
             vmId={this.props.vmId}
             trigger={({ onClick }) => (
               <SnapshotAction key='restore' id={`${this.props.id}-restore`} onClick={onClick} disabled={isRestoreDisabled}>
-                <Tooltip id={`${this.props.id}-restore-tt`} tooltip={msg.snapshotRestore()}>
+                <Tooltip id={`${this.props.id}-restore-tt`} tooltip={msg.snapshotRestore()} placement={'left'}>
                   <Icon type='fa' name='play-circle' />
                 </Tooltip>
               </SnapshotAction>
@@ -160,7 +160,7 @@ class SnapshotItem extends React.Component {
             onDelete={this.props.onSnapshotDelete}
             trigger={({ onClick }) => (
               <SnapshotAction key='delete' id={`${this.props.id}-delete`} disabled={isActionsDisabled} onClick={onClick}>
-                <Tooltip id={`${this.props.id}-delete-tt`} tooltip={msg.snapshotDelete()}>
+                <Tooltip id={`${this.props.id}-delete-tt`} tooltip={msg.snapshotDelete()} placement={'left'}>
                   <Icon type='pf' name='delete' />
                 </Tooltip>
               </SnapshotAction>
