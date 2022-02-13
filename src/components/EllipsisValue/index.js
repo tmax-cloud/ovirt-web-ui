@@ -35,7 +35,7 @@ class EllipsisValue extends React.Component {
     }
 
     const state = { isOverflow: false }
-    if (this.ref.current.offsetWidth < this.ref.current.scrollWidth) {
+    if (this.ref.current.offsetWidth < this.ref.current.clientWidth) {
       state.isOverflow = true
     }
     if (this.state.isOverflow !== state.isOverflow) {
